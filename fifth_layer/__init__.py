@@ -20,6 +20,7 @@ delegated to a pluggable reasoner implementing :class:`BaseReasoner`.
 architecture. No LLM adapters are implemented yet.
 """
 
+from fifth_layer.reasoners.probabilistic import ProbabilisticReasoner
 from fifth_layer.world_state import WorldState
 from fifth_layer.expected_consequences import ExpectedConsequences
 from fifth_layer.latent_state import LatentState
@@ -31,6 +32,7 @@ from fifth_layer.reasoners import (
     PlaceholderReasoner,
     RuleBasedReasoner,
     PhysicsReasoner,
+    ProbabilisticReasoner,
 )
 
 __all__ = [
@@ -44,5 +46,6 @@ __all__ = [
     "PlaceholderReasoner",
     "RuleBasedReasoner",
     "PhysicsReasoner",
+    "ProbabilisticReasoner",
 ]
 
