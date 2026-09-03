@@ -10,8 +10,10 @@ swapped in without changing FifthLayerEngine.
 from fifth_layer.reasoners.base import BaseReasoner
 from fifth_layer.reasoners.placeholder import PlaceholderReasoner
 from fifth_layer.reasoners.rule_based import RuleBasedReasoner
+from fifth_layer.reasoners.physics import PhysicsReasoner
 __all__ = [
     "BaseReasoner",
     "PlaceholderReasoner",
     "RuleBasedReasoner",
+    "PhysicsReasoner",
 ]

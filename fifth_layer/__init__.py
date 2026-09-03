@@ -26,7 +26,12 @@ from fifth_layer.latent_state import LatentState
 from fifth_layer.future_state import FutureState
 from fifth_layer.prediction_error import PredictionError
 from fifth_layer.engine import FifthLayerEngine
-from fifth_layer.reasoners import BaseReasoner, PlaceholderReasoner, RuleBasedReasoner
+from fifth_layer.reasoners import (
+    BaseReasoner,
+    PlaceholderReasoner,
+    RuleBasedReasoner,
+    PhysicsReasoner,
+)
 
 __all__ = [
     "WorldState",
@@ -37,5 +42,7 @@ __all__ = [
     "FifthLayerEngine",
     "BaseReasoner",
     "PlaceholderReasoner",
-    "RuleBasedReasoner"
+    "RuleBasedReasoner",
+    "PhysicsReasoner",
 ]
+
