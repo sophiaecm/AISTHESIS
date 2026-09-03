@@ -33,6 +33,7 @@ from fifth_layer.reasoners import (
     RuleBasedReasoner,
     PhysicsReasoner,
     ProbabilisticReasoner,
+    SensorFusionReasoner,
 )
 
 __all__ = [
@@ -47,5 +48,6 @@ __all__ = [
     "RuleBasedReasoner",
     "PhysicsReasoner",
     "ProbabilisticReasoner",
+    "SensorFusionReasoner"
 ]
 

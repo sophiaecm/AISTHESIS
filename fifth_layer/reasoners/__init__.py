@@ -12,10 +12,12 @@ from fifth_layer.reasoners.placeholder import PlaceholderReasoner
 from fifth_layer.reasoners.rule_based import RuleBasedReasoner
 from fifth_layer.reasoners.physics import PhysicsReasoner
 from fifth_layer.reasoners.probabilistic import ProbabilisticReasoner
+from fifth_layer.reasoners.sensor_fusion import SensorFusionReasoner
 __all__ = [
     "BaseReasoner",
     "PlaceholderReasoner",
     "RuleBasedReasoner",
     "PhysicsReasoner",
     "ProbabilisticReasoner",
+    "SensorFusionReasoner",
 ]
