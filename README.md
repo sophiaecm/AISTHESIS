@@ -35,3 +35,47 @@ is no machine learning or real sensory inference yet. See
 python3 example_v02.py
 ```
 
+## Fifth Layer Engine v0.3
+
+Fifth Layer Engine is model-independent. Its core architecture does not
+require a language model. Reasoning strategies are interchangeable
+modules.
+
+Version 0.3 separates inference from orchestration by introducing a
+reasoner interface, `BaseReasoner` (`fifth_layer/reasoners/base.py`).
+`FifthLayerEngine` no longer contains any model-specific inference
+logic — it simply calls into whatever reasoner it is given:
+
+- `infer_expected_consequences(world_state)`
+- `infer_latent_state(world_state, expected_consequences)`
+- `infer_future_state(latent_state)`
+
+`PlaceholderReasoner` (`fifth_layer/reasoners/placeholder.py`) implements
+this interface with the same trivial logic used in v0.2, and exists only
+to validate the architecture. It is the engine's default reasoner, but
+any `BaseReasoner`-compatible object can be passed in instead:
+
+```python
+engine = FifthLayerEngine(reasoner=PlaceholderReasoner())
+```
+
+`PredictionError` comparison logic remains in `FifthLayerEngine` for now.
+
+Future reasoning implementations may include:
+
+- physical rules
+- probabilistic inference
+- learned predictive models
+- sensor-derived models
+- optional LLM adapters (e.g. for OpenAI, Gemini, Claude, DeepSeek)
+
+None of these are implemented yet, and no such reasoner will ever be
+required by the core engine — they are opt-in, pluggable modules only.
+
+See `example_v03.py` for a runnable demonstration that explicitly
+instantiates `PlaceholderReasoner`:
+
+```bash
+python3 example_v03.py
+```
+
