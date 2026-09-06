@@ -1,18 +1,47 @@
-"""Spatial scene representation for Fifth Layer Engine v0.11."""
+"""Spatial scene representation for Fifth Layer Engine."""
+
+
+def _to_xywh(box):
+    """
+    Accept either:
+    - [left, top, width, height]
+    - [x1, y1, x2, y2] wrapped as {"box_xyxy": [...]}
+    """
+
+    if isinstance(box, dict):
+        if "box_xyxy" in box:
+            x1, y1, x2, y2 = box["box_xyxy"]
+            return (
+                float(x1),
+                float(y1),
+                float(x2 - x1),
+                float(y2 - y1),
+            )
+
+        if "box" in box:
+            left, top, width, height = box["box"]
+            return (
+                float(left),
+                float(top),
+                float(width),
+                float(height),
+            )
+
+    left, top, width, height = box
+
+    return (
+        float(left),
+        float(top),
+        float(width),
+        float(height),
+    )
 
 
 def horizontal_position(
     box,
     image_width,
 ):
-    """
-    Classify an object's horizontal position.
-
-    Returns:
-        "left", "center", or "right"
-    """
-
-    left, top, width, height = box
+    left, top, width, height = _to_xywh(box)
 
     object_center_x = left + width / 2
 
@@ -26,18 +55,13 @@ def horizontal_position(
         return "right"
 
     return "center"
+
+
 def vertical_position(
     box,
     image_height,
 ):
-    """
-    Classify an object's vertical position.
-
-    Returns:
-        "top", "middle", or "bottom"
-    """
-
-    left, top, width, height = box
+    left, top, width, height = _to_xywh(box)
 
     object_center_y = top + height / 2
 
@@ -51,19 +75,14 @@ def vertical_position(
         return "bottom"
 
     return "middle"
+
+
 def horizontal_relation(
     box_a,
     box_b,
 ):
-    """
-    Describe the horizontal relation between two objects.
-
-    Returns:
-        "left_of", "right_of", or "aligned"
-    """
-
-    left_a, top_a, width_a, height_a = box_a
-    left_b, top_b, width_b, height_b = box_b
+    left_a, top_a, width_a, height_a = _to_xywh(box_a)
+    left_b, top_b, width_b, height_b = _to_xywh(box_b)
 
     center_a = left_a + width_a / 2
     center_b = left_b + width_b / 2
@@ -75,24 +94,16 @@ def horizontal_relation(
         return "right_of"
 
     return "aligned"
+
+
 def distance_relation(
     box_a,
     box_b,
     image_width,
     image_height,
 ):
-    """
-    Estimate whether two objects are spatially near or far.
-
-    Uses the distance between object centers,
-    normalized by image size.
-
-    Returns:
-        "near" or "far"
-    """
-
-    left_a, top_a, width_a, height_a = box_a
-    left_b, top_b, width_b, height_b = box_b
+    left_a, top_a, width_a, height_a = _to_xywh(box_a)
+    left_b, top_b, width_b, height_b = _to_xywh(box_b)
 
     center_a_x = left_a + width_a / 2
     center_a_y = top_a + height_a / 2
@@ -110,27 +121,20 @@ def distance_relation(
         + image_height ** 2
     ) ** 0.5
 
-    normalized_distance = (
-        distance / image_diagonal
-    )
+    normalized_distance = distance / image_diagonal
 
     if normalized_distance < 0.35:
         return "near"
 
     return "far"
+
+
 def overlap_relation(
     box_a,
     box_b,
 ):
-    """
-    Check whether two object bounding boxes overlap.
-
-    Returns:
-        "overlapping" or "separate"
-    """
-
-    left_a, top_a, width_a, height_a = box_a
-    left_b, top_b, width_b, height_b = box_b
+    left_a, top_a, width_a, height_a = _to_xywh(box_a)
+    left_b, top_b, width_b, height_b = _to_xywh(box_b)
 
     right_a = left_a + width_a
     bottom_a = top_a + height_a

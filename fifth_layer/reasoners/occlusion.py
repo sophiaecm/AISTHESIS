@@ -1,4 +1,5 @@
-"""Occlusion reasoning for Fifth Layer Engine v0.18."""
+"""Occlusion reasoning for Fifth Layer Engine."""
+
 
 from fifth_layer.expected_consequences import ExpectedConsequences
 from fifth_layer.future_state import FutureState
@@ -14,6 +15,7 @@ class OcclusionReasoner(BaseReasoner):
         self,
         world_state: WorldState,
     ) -> ExpectedConsequences:
+
         evidence = world_state.data.get(
             "occlusion_evidence",
             [],
@@ -92,6 +94,7 @@ class OcclusionReasoner(BaseReasoner):
         world_state: WorldState,
         expected_consequences: ExpectedConsequences,
     ) -> LatentState:
+
         features = dict(
             world_state.data
         )
@@ -133,6 +136,7 @@ class OcclusionReasoner(BaseReasoner):
         self,
         latent_state: LatentState,
     ) -> FutureState:
+
         future_data = dict(
             latent_state.features
         )
@@ -152,12 +156,16 @@ class OcclusionReasoner(BaseReasoner):
         if count > 0:
             future_data[
                 "predicted_occlusion_event"
-            ] = "partially_hidden_content_may_become_visible"
+            ] = (
+                "partially_hidden_content_may_become_visible"
+            )
 
         else:
             future_data[
                 "predicted_occlusion_event"
-            ] = "no_occlusion_change_expected"
+            ] = (
+                "no_occlusion_change_expected"
+            )
 
         return FutureState(
             horizon=1.0,
