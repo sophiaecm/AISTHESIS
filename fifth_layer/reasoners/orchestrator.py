@@ -3,6 +3,7 @@ from fifth_layer.reasoners.active_perception import ActivePerceptionReasoner
 from fifth_layer.reasoners.occlusion import OcclusionReasoner
 from fifth_layer.reasoners.scene import SceneReasoner
 from fifth_layer.reasoners.sensor_fusion import SensorFusionReasoner
+from fifth_layer.reasoners.temporal_prediction import TemporalPredictionReasoner
 from fifth_layer.world_state import WorldState
 
 
@@ -30,6 +31,10 @@ class AisthesisOrchestrator:
 
         self.scene_reasoner = (
             SceneReasoner()
+        )
+
+        self.temporal_prediction_reasoner = (
+            TemporalPredictionReasoner()
         )
 
         self.sensor_fusion_reasoner = (
@@ -118,7 +123,33 @@ class AisthesisOrchestrator:
         )
 
         # --------------------------------------------------
-        # 5. Sensor Fusion
+        # 5. Temporal Prediction
+        # --------------------------------------------------
+
+        temporal_expected = (
+            self.temporal_prediction_reasoner
+            .infer_expected_consequences(
+                world_state
+            )
+        )
+
+        temporal_latent = (
+            self.temporal_prediction_reasoner
+            .infer_latent_state(
+                world_state,
+                temporal_expected,
+            )
+        )
+
+        temporal_future = (
+            self.temporal_prediction_reasoner
+            .infer_future_state(
+                temporal_latent
+            )
+        )
+
+        # --------------------------------------------------
+        # 6. Sensor Fusion
         # --------------------------------------------------
 
         fusion_expected = (
@@ -144,7 +175,7 @@ class AisthesisOrchestrator:
         )
 
         # --------------------------------------------------
-        # 6. Unified AISTHESIS Result
+        # 7. Unified AISTHESIS Result
         # --------------------------------------------------
 
         return {
@@ -173,6 +204,18 @@ class AisthesisOrchestrator:
                 ),
                 "future": (
                     scene_future.data
+                ),
+            },
+
+            "temporal": {
+                "expected": (
+                    temporal_expected.predictions
+                ),
+                "latent": (
+                    temporal_latent.features
+                ),
+                "future": (
+                    temporal_future.data
                 ),
             },
 

@@ -9,11 +9,13 @@ from fifth_layer.reasoners.base import BaseReasoner
 
 class SensorFusionReasoner(BaseReasoner):
     """
-    Fuse visual, motion, physics, and occlusion evidence.
+    Fuse evidence conservatively.
 
-    The reasoner does not assume that missing evidence means absence.
-    It only increases hidden-state probability when observable evidence
-    supports a latent hypothesis.
+    Important:
+    - Generic occlusion does NOT imply a hidden actor.
+    - Frame truncation alone does NOT imply a hidden actor.
+    - Hidden actor inference requires actor-specific overlap
+      or another explicit actor-related cue.
     """
 
     def infer_expected_consequences(
@@ -25,10 +27,11 @@ class SensorFusionReasoner(BaseReasoner):
 
         predictions = {}
 
-        evidence = []
+        hidden_actor_evidence = []
+        generic_evidence = []
 
         # --------------------------------------------------
-        # Existing visual evidence
+        # 1. Actor-specific visual evidence
         # --------------------------------------------------
 
         vision_confidence = float(
@@ -46,7 +49,7 @@ class SensorFusionReasoner(BaseReasoner):
         )
 
         if vision_hidden_actor:
-            evidence.append(
+            hidden_actor_evidence.append(
                 {
                     "source": "vision",
                     "confidence": vision_confidence,
@@ -54,7 +57,7 @@ class SensorFusionReasoner(BaseReasoner):
             )
 
         # --------------------------------------------------
-        # Motion evidence
+        # 2. Actor-specific motion evidence
         # --------------------------------------------------
 
         motion_confidence = float(
@@ -72,7 +75,7 @@ class SensorFusionReasoner(BaseReasoner):
         )
 
         if motion_toward_occlusion:
-            evidence.append(
+            hidden_actor_evidence.append(
                 {
                     "source": "motion",
                     "confidence": motion_confidence,
@@ -80,7 +83,7 @@ class SensorFusionReasoner(BaseReasoner):
             )
 
         # --------------------------------------------------
-        # Physics evidence
+        # 3. Actor-specific physics evidence
         # --------------------------------------------------
 
         physics_confidence = float(
@@ -90,15 +93,15 @@ class SensorFusionReasoner(BaseReasoner):
             )
         )
 
-        physics_interaction = bool(
+        physics_hidden_interaction = bool(
             data.get(
                 "physics_hidden_interaction_possible",
                 False,
             )
         )
 
-        if physics_interaction:
-            evidence.append(
+        if physics_hidden_interaction:
+            hidden_actor_evidence.append(
                 {
                     "source": "physics",
                     "confidence": physics_confidence,
@@ -106,7 +109,7 @@ class SensorFusionReasoner(BaseReasoner):
             )
 
         # --------------------------------------------------
-        # Occlusion evidence
+        # 4. Occlusion evidence
         # --------------------------------------------------
 
         occlusion_evidence = data.get(
@@ -114,31 +117,56 @@ class SensorFusionReasoner(BaseReasoner):
             [],
         )
 
-        occlusion_scores = []
+        generic_occlusion_scores = []
+        actor_occlusion_scores = []
+
+        actor_terms = {
+            "person",
+            "pedestrian",
+            "human",
+            "child",
+            "cyclist",
+            "bicycle",
+            "motorcycle",
+            "rider",
+        }
 
         for item in occlusion_evidence:
 
             probability = 0.0
 
-            if item.get(
-                "frame_truncated",
-                False,
-            ):
-                probability += 0.35
+            frame_truncated = bool(
+                item.get(
+                    "frame_truncated",
+                    False,
+                )
+            )
 
-            if item.get(
-                "has_overlap_evidence",
-                False,
-            ):
-                probability += 0.35
+            has_overlap = bool(
+                item.get(
+                    "has_overlap_evidence",
+                    False,
+                )
+            )
 
             overlaps = item.get(
                 "overlapping_objects",
                 [],
             )
 
-            if overlaps:
+            # ----------------------------------------------
+            # Generic occlusion score
+            # ----------------------------------------------
 
+            if frame_truncated:
+                probability += 0.35
+
+            if has_overlap:
+                probability += 0.35
+
+            strongest_overlap = 0.0
+
+            if overlaps:
                 strongest_overlap = max(
                     (
                         float(
@@ -163,25 +191,96 @@ class SensorFusionReasoner(BaseReasoner):
             )
 
             if probability > 0:
-                occlusion_scores.append(
+                generic_occlusion_scores.append(
                     probability
                 )
 
-        if occlusion_scores:
+            # ----------------------------------------------
+            # Actor-specific occlusion score
+            #
+            # IMPORTANT:
+            # Frame truncation alone is not enough.
+            # We require real overlap evidence.
+            # ----------------------------------------------
 
-            strongest_occlusion = max(
-                occlusion_scores
+            class_name = str(
+                item.get(
+                    "class_name",
+                    "",
+                )
+            ).lower()
+
+            if (
+                class_name in actor_terms
+                and has_overlap
+                and strongest_overlap > 0.0
+            ):
+                actor_probability = (
+                    0.35
+                    + min(
+                        strongest_overlap,
+                        0.45,
+                    )
+                )
+
+                actor_probability = min(
+                    actor_probability,
+                    0.90,
+                )
+
+                actor_occlusion_scores.append(
+                    actor_probability
+                )
+
+        # --------------------------------------------------
+        # Generic occlusion output
+        # --------------------------------------------------
+
+        if generic_occlusion_scores:
+
+            strongest_generic = max(
+                generic_occlusion_scores
             )
 
-            evidence.append(
+            generic_evidence.append(
                 {
                     "source": "occlusion",
-                    "confidence": strongest_occlusion,
+                    "confidence": strongest_generic,
+                }
+            )
+
+            predictions[
+                "generic_occlusion_probability"
+            ] = round(
+                strongest_generic,
+                3,
+            )
+
+        else:
+
+            predictions[
+                "generic_occlusion_probability"
+            ] = 0.0
+
+        # --------------------------------------------------
+        # Actor-specific occlusion contribution
+        # --------------------------------------------------
+
+        if actor_occlusion_scores:
+
+            strongest_actor_occlusion = max(
+                actor_occlusion_scores
+            )
+
+            hidden_actor_evidence.append(
+                {
+                    "source": "actor_occlusion",
+                    "confidence": strongest_actor_occlusion,
                 }
             )
 
         # --------------------------------------------------
-        # Semantic evidence
+        # 5. Semantic evidence
         # --------------------------------------------------
 
         semantic_evidence = data.get(
@@ -200,24 +299,22 @@ class SensorFusionReasoner(BaseReasoner):
         )
 
         if mentioned_objects:
-
             predictions[
                 "semantic_object_evidence"
             ] = mentioned_objects
 
         if mentioned_actions:
-
             predictions[
                 "semantic_action_evidence"
             ] = mentioned_actions
 
         # --------------------------------------------------
-        # Fuse evidence
+        # 6. Hidden actor fusion
         # --------------------------------------------------
 
         confidence_values = [
             item["confidence"]
-            for item in evidence
+            for item in hidden_actor_evidence
             if item["confidence"] > 0
         ]
 
@@ -248,7 +345,7 @@ class SensorFusionReasoner(BaseReasoner):
         )
 
         # --------------------------------------------------
-        # Uncertainty
+        # 7. Uncertainty
         # --------------------------------------------------
 
         if confidence_values:
@@ -281,13 +378,22 @@ class SensorFusionReasoner(BaseReasoner):
 
         predictions[
             "active_evidence_sources"
-        ] = len(evidence)
+        ] = len(
+            hidden_actor_evidence
+        )
 
         predictions[
             "evidence_sources"
         ] = [
             item["source"]
-            for item in evidence
+            for item in hidden_actor_evidence
+        ]
+
+        predictions[
+            "generic_evidence_sources"
+        ] = [
+            item["source"]
+            for item in generic_evidence
         ]
 
         return ExpectedConsequences(
@@ -315,7 +421,20 @@ class SensorFusionReasoner(BaseReasoner):
             )
         )
 
-        if probability >= 0.70:
+        active_sources = int(
+            features.get(
+                "active_evidence_sources",
+                0,
+            )
+        )
+
+        if active_sources == 0:
+
+            features[
+                "latent_hypothesis"
+            ] = "insufficient_hidden_actor_evidence"
+
+        elif probability >= 0.70:
 
             features[
                 "latent_hypothesis"
@@ -346,8 +465,10 @@ class SensorFusionReasoner(BaseReasoner):
             latent_state.features
         )
 
-        hypothesis = latent_state.features.get(
-            "latent_hypothesis"
+        hypothesis = (
+            latent_state.features.get(
+                "latent_hypothesis"
+            )
         )
 
         probability = float(
@@ -377,7 +498,7 @@ class SensorFusionReasoner(BaseReasoner):
                 "risk_level"
             ] = "medium"
 
-        else:
+        elif hypothesis == "hidden_actor_unlikely":
 
             future_data[
                 "predicted_event"
@@ -386,6 +507,16 @@ class SensorFusionReasoner(BaseReasoner):
             future_data[
                 "risk_level"
             ] = "low"
+
+        else:
+
+            future_data[
+                "predicted_event"
+            ] = "indeterminate"
+
+            future_data[
+                "risk_level"
+            ] = "UNKNOWN"
 
         future_data[
             "prediction_confidence"
