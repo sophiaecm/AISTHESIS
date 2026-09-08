@@ -113,6 +113,11 @@ def extract_motion_evidence(
             if current_id in used_current:
                 continue
 
+            if "track_id" in previous or "track_id" in current:
+                if previous.get("track_id") != current.get("track_id"):
+                    continue
+
+
             current_class = current.get(
                 "class_name",
                 "unknown",
@@ -226,6 +231,7 @@ def extract_motion_evidence(
 
         evidence.append(
             {
+                **({"track_id": current["track_id"]} if "track_id" in current else {}),
                 "previous_object_id": previous_id,
                 "current_object_id": best_match_id,
 

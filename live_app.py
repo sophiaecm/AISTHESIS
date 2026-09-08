@@ -11,10 +11,14 @@ import cv2
 from ultralytics import YOLO
 
 from fifth_layer.world_state import WorldState
+from fifth_layer.perception.analysis_snapshot import AnalysisSnapshot
+from fifth_layer.perception.tracking import ObjectTracker
+from fifth_layer.prediction_feedback import PredictionFeedback
 from fifth_layer.perception.smolvlm_scene import SmolVLMScenePerception
 from fifth_layer.perception.perception_fusion import PerceptionFusion
 from fifth_layer.perception.temporal import extract_motion_evidence
 from fifth_layer.reasoners.orchestrator import AisthesisOrchestrator
+from fifth_layer.reasoners.temporal_prediction import TemporalPredictionReasoner
 
 
 # ---------------------------------------------------------
@@ -31,9 +35,17 @@ DESCRIPTION_INTERVAL_SECONDS = 10.0
 # Stabilization
 DESCRIPTION_MIN_HOLD_SECONDS = 7.0
 REASONING_MIN_HOLD_SECONDS = 4.0
+PREDICTION_DISPLAY_HOLD_SECONDS = 2.0
 
 MOTION_HISTORY_SIZE = 7
 MOTION_MIN_VOTES = 4
+
+# Live performance / reliability
+LIVE_YOLO_EVERY_N_FRAMES = 2
+LIVE_YOLO_EVERY_N_FRAMES_DURING_VLM = 4
+LIVE_MIN_TRACK_CONFIDENCE = 0.65
+LIVE_MAX_NORMALIZED_SPEED = 1.25
+SMOLVLM_MAX_DIMENSION = 448
 
 
 # ---------------------------------------------------------
@@ -54,6 +66,9 @@ model_load_lock = threading.Lock()
 
 perception_fusion = PerceptionFusion()
 orchestrator = AisthesisOrchestrator()
+temporal_reasoner = TemporalPredictionReasoner()
+object_tracker = ObjectTracker()
+prediction_feedback = PredictionFeedback()
 
 
 # ---------------------------------------------------------
@@ -69,7 +84,13 @@ latest_reasoning = {
     "uncertainty": 1.0,
 }
 
+# UI-only cache. The inference state remains real-time, while the last
+# meaningful temporal prediction stays visible briefly for readability.
+display_reasoning = dict(latest_reasoning)
+display_reasoning_last_valid_at = 0.0
+
 latest_motion_evidence = []
+latest_stable_motion_evidence = []
 latest_motion_summary = "waiting_for_motion"
 
 analysis_running = False
@@ -144,6 +165,7 @@ def build_yolo_world_state(
     frame,
     result,
     source_type="camera",
+    timestamp=None,
 ):
 
     detections = []
@@ -197,7 +219,7 @@ def build_yolo_world_state(
     height, width = frame.shape[:2]
 
     return WorldState(
-        timestamp=time.time(),
+        timestamp=time.time() if timestamp is None else timestamp,
         data={
             "source_type": source_type,
             "image_width": width,
@@ -406,8 +428,12 @@ def update_stable_reasoning(
 def reset_motion_smoothing():
 
     global motion_history
+    global latest_stable_motion_evidence
 
+    object_tracker.reset()
+    prediction_feedback.reset()
     motion_history.clear()
+    latest_stable_motion_evidence = []
 
 
 def _motion_candidate_from_evidence(
@@ -434,6 +460,7 @@ def _motion_candidate_from_evidence(
         )
 
         return {
+            "track_id": strongest.get("track_id"),
             "class_name": strongest.get(
                 "class_name",
                 "object",
@@ -452,6 +479,7 @@ def _motion_candidate_from_evidence(
         first = motion_evidence[0]
 
         return {
+            "track_id": first.get("track_id"),
             "class_name": first.get(
                 "class_name",
                 "object",
@@ -472,6 +500,7 @@ def update_smoothed_motion(
 ):
 
     global latest_motion_summary
+    global latest_stable_motion_evidence
     global motion_history
 
     candidate = (
@@ -484,140 +513,182 @@ def update_smoothed_motion(
         candidate
     )
 
-    if len(
-        motion_history
-    ) < 3:
+    # Until a short history exists, do not expose motion
+    # to the predictive reasoner.
+    if len(motion_history) < 3:
+        latest_stable_motion_evidence = []
         return
 
-    keys = []
-
-    for item in motion_history:
-
-        key = (
-            item.get(
-                "class_name"
-            ),
-            item.get(
-                "motion_state"
-            ),
+    keys = [
+        (
+            item.get("class_name"),
+            item.get("motion_state"),
+            item.get("track_id"),
         )
-
-        keys.append(
-            key
-        )
-
-    counts = Counter(
-        keys
-    )
+        for item in motion_history
+    ]
 
     strongest_key, votes = (
-        counts.most_common(
-            1
-        )[0]
+        Counter(keys).most_common(1)[0]
     )
 
     required_votes = min(
         MOTION_MIN_VOTES,
         max(
             2,
-            len(
-                motion_history
-            )
-            // 2
-            + 1,
+            len(motion_history) // 2 + 1,
         ),
     )
 
     if votes < required_votes:
+        latest_stable_motion_evidence = []
         return
 
-    class_name, motion_state = (
-        strongest_key
-    )
+    class_name, motion_state, track_id = strongest_key
 
-    matching = [
+    matching_history = [
         item
         for item in motion_history
         if (
-            item.get(
-                "class_name"
-            ),
-            item.get(
-                "motion_state"
-            ),
-        )
-        == strongest_key
+            item.get("class_name"),
+            item.get("motion_state"),
+            item.get("track_id"),
+        ) == strongest_key
     ]
 
     speeds = [
-        float(
-            item["speed"]
-        )
-        for item in matching
-        if item.get(
-            "speed"
-        )
-        is not None
+        float(item["speed"])
+        for item in matching_history
+        if item.get("speed") is not None
     ]
 
-    if speeds:
-
-        average_speed = (
-            sum(speeds)
-            / len(speeds)
-        )
-
-    else:
-
-        average_speed = None
+    average_speed = (
+        sum(speeds) / len(speeds)
+        if speeds
+        else None
+    )
 
     if motion_state == "no_match":
-
-        latest_motion_summary = (
-            "no_temporal_match"
-        )
-
+        latest_stable_motion_evidence = []
+        latest_motion_summary = "no_temporal_match"
         return
 
     if motion_state == "stationary":
-
-        if class_name:
-
-            latest_motion_summary = (
-                f"{class_name} stationary"
-            )
-
-        else:
-
-            latest_motion_summary = (
-                "tracked_objects_stationary"
-            )
-
+        latest_stable_motion_evidence = []
+        latest_motion_summary = (
+            f"{class_name} stationary"
+            if class_name
+            else "tracked_objects_stationary"
+        )
         return
 
-    if (
-        class_name
-        and average_speed
-        is not None
-    ):
+    # Preserve geometric fields from the newest raw evidence
+    # that agrees with the winning stabilized state.
+    raw_matches = [
+        item
+        for item in motion_evidence
+        if item.get("class_name") == class_name
+        and item.get("motion_state") == motion_state
+        and item.get("track_id") == track_id
+    ]
 
+    if not raw_matches:
+        latest_stable_motion_evidence = []
+        return
+
+    strongest_raw = max(
+        raw_matches,
+        key=lambda item: item.get(
+            "normalized_motion",
+            0.0,
+        ),
+    )
+
+    stable_item = dict(strongest_raw)
+
+    raw_speed = stable_item.get(
+        "speed_pixels_per_second"
+    )
+
+    if (
+        average_speed is not None
+        and raw_speed is not None
+        and float(raw_speed) > 0.0
+    ):
+        scale = average_speed / float(raw_speed)
+
+        if stable_item.get("velocity_x") is not None:
+            stable_item["velocity_x"] = (
+                float(stable_item["velocity_x"])
+                * scale
+            )
+
+        if stable_item.get("velocity_y") is not None:
+            stable_item["velocity_y"] = (
+                float(stable_item["velocity_y"])
+                * scale
+            )
+
+        stable_item[
+            "speed_pixels_per_second"
+        ] = average_speed
+
+    latest_stable_motion_evidence = [
+        stable_item
+    ]
+
+    if class_name and average_speed is not None:
         latest_motion_summary = (
-            f"{class_name} "
-            f"{motion_state} "
+            f"{class_name} {motion_state} "
             f"({average_speed:.1f} px/s)"
         )
-
     elif class_name:
-
         latest_motion_summary = (
-            f"{class_name} "
-            f"{motion_state}"
+            f"{class_name} {motion_state}"
         )
 
 
 # ---------------------------------------------------------
 # Temporal motion
 # ---------------------------------------------------------
+
+def filter_live_tracking_detections(
+    detections,
+):
+    """Keep only detections reliable enough to drive live motion reasoning.
+
+    Low-confidence one-frame class hallucinations may still be drawn by YOLO,
+    but they do not become temporal evidence.
+    """
+
+    return [
+        detection
+        for detection in detections
+        if float(
+            detection.get(
+                "confidence",
+                0.0,
+            )
+        )
+        >= LIVE_MIN_TRACK_CONFIDENCE
+    ]
+
+
+def track_observation(current_state):
+    data = current_state.data
+    visible = object_tracker.update(
+        filter_live_tracking_detections(data.get("detections", [])),
+        current_state.timestamp, data["image_width"], data["image_height"],
+    )
+    identities = {item["object_id"]: item["track_id"] for item in visible}
+    for detection in data.get("detections", []):
+        if detection["object_id"] in identities:
+            detection["track_id"] = identities[detection["object_id"]]
+    data["prediction_feedback"] = prediction_feedback.observe(
+        current_state.timestamp, visible, data["image_width"], data["image_height"],
+    )
+    return visible
+
 
 def calculate_temporal_motion(
     previous_detections,
@@ -677,6 +748,186 @@ def calculate_temporal_motion(
     return motion_evidence
 
 
+def update_live_temporal_prediction(
+    current_state,
+):
+    """Run lightweight trajectory reasoning every frame.
+
+    SmolVLM is intentionally not involved here. This keeps
+    motion -> trajectory -> latent -> future prediction live.
+
+    Temporal predictions are cancelled as soon as stabilized
+    motion disappears, so an old trajectory cannot remain visible
+    after the tracked object becomes stationary.
+    """
+
+    global latest_reasoning
+    global reasoning_last_changed_at
+
+    stable_motion = list(
+        latest_stable_motion_evidence
+    )
+
+    moving_items = [
+        item
+        for item in stable_motion
+        if item.get(
+            "motion_state"
+        )
+        != "stationary"
+    ]
+
+    # -----------------------------------------------------
+    # Temporal prediction expiration / cancellation
+    # -----------------------------------------------------
+    #
+    # A trajectory prediction is only valid while stabilized
+    # motion evidence still supports it. If the object stops,
+    # immediately remove a previous temporal-live prediction.
+    #
+    # Do not erase a sensor-fusion result here.
+    # -----------------------------------------------------
+
+    if not moving_items:
+
+        if (
+            latest_reasoning.get("source")
+            == "temporal_live"
+        ):
+            latest_reasoning = {
+                "latent": "insufficient_evidence",
+                "prediction": "indeterminate",
+                "risk": "UNKNOWN",
+                "uncertainty": 1.0,
+                "source": "temporal_expired",
+            }
+
+            reasoning_last_changed_at = (
+                time.time()
+            )
+
+        return
+
+    temporal_data = dict(
+        current_state.data
+    )
+
+    temporal_data[
+        "motion_evidence"
+    ] = moving_items
+
+    temporal_data[
+        "moving_object_count"
+    ] = len(
+        moving_items
+    )
+
+    temporal_data[
+        "strongest_motion"
+    ] = max(
+        moving_items,
+        key=lambda item: item.get(
+            "normalized_motion",
+            0.0,
+        ),
+    )
+
+    temporal_data[
+        "motion_detected"
+    ] = True
+
+    temporal_state = WorldState(
+        timestamp=time.time(),
+        data=temporal_data,
+    )
+
+    expected = (
+        temporal_reasoner
+        .infer_expected_consequences(
+            temporal_state
+        )
+    )
+
+    latent = (
+        temporal_reasoner
+        .infer_latent_state(
+            temporal_state,
+            expected,
+        )
+    )
+
+    future = (
+        temporal_reasoner
+        .infer_future_state(
+            latent
+        )
+    )
+
+    prediction_feedback.record(
+        current_state.timestamp,
+        temporal_data["strongest_motion"].get("track_id"),
+        expected.predictions.get("predicted_center_1s"),
+    )
+
+    latent_name = latent.features.get(
+        "latent_temporal_state",
+        "motion_continuation_possible",
+    )
+
+    prediction = future.data.get(
+        "predicted_event",
+        "indeterminate",
+    )
+
+    if prediction in {
+        None,
+        "indeterminate",
+        "tracked_objects_likely_remain_stationary",
+    }:
+
+        if (
+            latest_reasoning.get("source")
+            == "temporal_live"
+        ):
+            latest_reasoning = {
+                "latent": "insufficient_evidence",
+                "prediction": "indeterminate",
+                "risk": "UNKNOWN",
+                "uncertainty": 1.0,
+                "source": "temporal_expired",
+            }
+
+            reasoning_last_changed_at = (
+                time.time()
+            )
+
+        return
+
+    occlusion_states = {
+        "trajectory_toward_occlusion",
+        "visibility_loss_possible",
+        "trajectory_toward_view_exit",
+    }
+
+    uncertainty = (
+        0.35
+        if latent_name in occlusion_states
+        else 0.50
+    )
+
+    latest_reasoning = {
+        "latent": latent_name,
+        "prediction": prediction,
+        "risk": "UNKNOWN",
+        "uncertainty": uncertainty,
+        "source": "temporal_live",
+    }
+
+    reasoning_last_changed_at = (
+        time.time()
+    )
+
+
 # ---------------------------------------------------------
 # SmolVLM + Fusion + Fifth Layer
 # ---------------------------------------------------------
@@ -686,6 +937,7 @@ def analyze_existing_yolo_result(
     yolo_result,
     source_type="camera",
     motion_evidence=None,
+    snapshot=None,
 ):
 
     global latest_reasoning
@@ -694,23 +946,22 @@ def analyze_existing_yolo_result(
 
     try:
 
-        load_smolvlm()
-
-        yolo_state = (
-            build_yolo_world_state(
+        if snapshot is None:
+            snapshot = AnalysisSnapshot.capture(
                 frame,
-                yolo_result,
-                source_type,
+                build_yolo_world_state(frame, yolo_result, source_type),
+                motion_evidence or [],
             )
-        )
-
-        vlm_frame = frame.copy()
+        yolo_state = snapshot.world_state()
+        stable_motion_evidence = snapshot.motion_evidence()
+        vlm_frame = snapshot.frame().copy()
+        load_smolvlm()
 
         height, width = (
             vlm_frame.shape[:2]
         )
 
-        max_dimension = 640
+        max_dimension = SMOLVLM_MAX_DIMENSION
 
         if (
             max(
@@ -798,19 +1049,16 @@ def analyze_existing_yolo_result(
         # Temporal evidence
         # -------------------------------------------------
 
+        fused_state.timestamp = snapshot.timestamp
+        fused_state.data["observation_timestamp"] = snapshot.timestamp
+
         fused_state.data[
             "motion_evidence"
-        ] = (
-            motion_evidence
-            or []
-        )
+        ] = stable_motion_evidence
 
         moving_items = [
             item
-            for item in (
-                motion_evidence
-                or []
-            )
+            for item in stable_motion_evidence
             if item.get(
                 "motion_state"
             )
@@ -957,9 +1205,16 @@ def analyze_existing_yolo_result(
         # -------------------------------------------------
         # Select visible prediction
         #
-        # Real observed motion gets temporal prediction.
-        # Hidden-actor prediction is used only when there
-        # is explicit hidden-actor evidence.
+        # Priority:
+        # 1. Occlusion-aware temporal prediction
+        # 2. Other temporal motion prediction
+        # 3. Supported sensor-fusion prediction
+        # 4. Indeterminate
+        #
+        # Important:
+        # Generic occlusion is not treated as proof of a
+        # hidden actor. These states describe visibility
+        # changes of an already observed tracked object.
         # -------------------------------------------------
 
         moving_now = any(
@@ -967,13 +1222,33 @@ def analyze_existing_yolo_result(
                 "motion_state"
             )
             != "stationary"
-            for item in (
-                motion_evidence
-                or []
-            )
+            for item in stable_motion_evidence
         )
 
+        occlusion_temporal_states = {
+            "trajectory_toward_occlusion",
+            "visibility_loss_possible",
+            "trajectory_toward_view_exit",
+        }
+
         if (
+            moving_now
+            and temporal_state
+            in occlusion_temporal_states
+            and temporal_prediction
+            and temporal_prediction
+            != "indeterminate"
+        ):
+
+            candidate_reasoning = {
+                "latent": temporal_state,
+                "prediction": temporal_prediction,
+                "risk": "UNKNOWN",
+                "uncertainty": 0.35,
+                "source": "temporal_deep",
+            }
+
+        elif (
             moving_now
             and temporal_prediction
             and temporal_prediction
@@ -986,11 +1261,10 @@ def analyze_existing_yolo_result(
                     or
                     "motion_continuation_possible"
                 ),
-                "prediction": (
-                    temporal_prediction
-                ),
+                "prediction": temporal_prediction,
                 "risk": "UNKNOWN",
                 "uncertainty": 0.50,
+                "source": "temporal_deep",
             }
 
         elif active_sources > 0:
@@ -1014,41 +1288,18 @@ def analyze_existing_yolo_result(
                         "UNKNOWN",
                     )
                 ),
-                "uncertainty": (
-                    uncertainty
-                ),
-            }
-
-        elif (
-            temporal_prediction
-            and temporal_prediction
-            != "indeterminate"
-        ):
-
-            candidate_reasoning = {
-                "latent": (
-                    temporal_state
-                    or
-                    "insufficient_temporal_evidence"
-                ),
-                "prediction": (
-                    temporal_prediction
-                ),
-                "risk": "UNKNOWN",
-                "uncertainty": 0.70,
+                "uncertainty": uncertainty,
+                "source": "sensor_fusion",
             }
 
         else:
 
             candidate_reasoning = {
-                "latent": (
-                    "insufficient_evidence"
-                ),
-                "prediction": (
-                    "indeterminate"
-                ),
+                "latent": "insufficient_evidence",
+                "prediction": "indeterminate",
                 "risk": "UNKNOWN",
                 "uncertainty": 1.0,
+                "source": "insufficient_evidence",
             }
 
         update_stable_reasoning(
@@ -1090,6 +1341,7 @@ def analyze_background(
     yolo_result,
     source_type="camera",
     motion_evidence=None,
+    world_state=None,
 ):
 
     global analysis_running
@@ -1097,14 +1349,13 @@ def analyze_background(
     if analysis_running:
         return
 
-    analysis_running = True
-
-    frame_copy = frame.copy()
-
-    motion_copy = list(
-        motion_evidence
-        or []
+    snapshot = AnalysisSnapshot.capture(
+        frame,
+        world_state if world_state is not None else
+        build_yolo_world_state(frame, yolo_result, source_type),
+        motion_evidence or [],
     )
+    analysis_running = True
 
     def worker():
 
@@ -1113,10 +1364,10 @@ def analyze_background(
         try:
 
             analyze_existing_yolo_result(
-                frame_copy,
-                yolo_result,
+                None,
+                None,
                 source_type,
-                motion_copy,
+                snapshot=snapshot,
             )
 
         finally:
@@ -1127,6 +1378,47 @@ def analyze_background(
         target=worker,
         daemon=True,
     ).start()
+
+
+
+def get_display_reasoning():
+    """Return a readable UI view without delaying inference-state changes."""
+
+    global display_reasoning
+    global display_reasoning_last_valid_at
+
+    now = time.time()
+
+    current = dict(
+        latest_reasoning
+    )
+
+    prediction = current.get(
+        "prediction",
+        "indeterminate",
+    )
+
+    meaningful = prediction not in {
+        None,
+        "",
+        "indeterminate",
+        "analyzing",
+    }
+
+    if meaningful:
+        display_reasoning = current
+        display_reasoning_last_valid_at = now
+        return display_reasoning
+
+    if (
+        display_reasoning_last_valid_at > 0.0
+        and now - display_reasoning_last_valid_at
+        < PREDICTION_DISPLAY_HOLD_SECONDS
+    ):
+        return display_reasoning
+
+    display_reasoning = current
+    return display_reasoning
 
 
 # ---------------------------------------------------------
@@ -1141,29 +1433,33 @@ def draw_overlay(
         latest_description
     )
 
+    ui_reasoning = (
+        get_display_reasoning()
+    )
+
     latent = (
-        latest_reasoning.get(
+        ui_reasoning.get(
             "latent",
             "N/A",
         )
     )
 
     prediction = (
-        latest_reasoning.get(
+        ui_reasoning.get(
             "prediction",
             "N/A",
         )
     )
 
     risk = (
-        latest_reasoning.get(
+        ui_reasoning.get(
             "risk",
             "UNKNOWN",
         )
     )
 
     uncertainty = float(
-        latest_reasoning.get(
+        ui_reasoning.get(
             "uncertainty",
             1.0,
         )
@@ -1172,6 +1468,10 @@ def draw_overlay(
     motion = (
         latest_motion_summary
     )
+    evaluated = [item for item in prediction_feedback.history if item["status"] == "evaluated"]
+    if evaluated:
+        motion += f" | error: {evaluated[-1]['error_pixels']:.1f}px"
+
 
     max_chars = 65
 
@@ -1374,7 +1674,10 @@ def run_live_camera():
     global latest_description
     global latest_reasoning
     global latest_motion_evidence
+    global latest_stable_motion_evidence
     global latest_motion_summary
+    global display_reasoning
+    global display_reasoning_last_valid_at
 
     global description_last_changed_at
     global reasoning_last_changed_at
@@ -1390,7 +1693,13 @@ def run_live_camera():
         "uncertainty": 1.0,
     }
 
+    display_reasoning = dict(
+        latest_reasoning
+    )
+    display_reasoning_last_valid_at = 0.0
+
     latest_motion_evidence = []
+    latest_stable_motion_evidence = []
 
     latest_motion_summary = (
         "collecting_temporal_evidence"
@@ -1419,6 +1728,16 @@ def run_live_camera():
 
         return
 
+    # Keep the capture buffer short when the backend supports it.
+    # This reduces the feeling of watching old queued frames.
+    try:
+        cap.set(
+            cv2.CAP_PROP_BUFFERSIZE,
+            1,
+        )
+    except Exception:
+        pass
+
     camera_started_at = (
         time.time()
     )
@@ -1427,73 +1746,133 @@ def run_live_camera():
         camera_started_at
     )
 
+    frame_index = 0
+    last_yolo_result = None
+    last_current_state = None
+    last_annotated_frame = None
+
     while True:
 
         success, frame = (
             cap.read()
         )
+        frame_timestamp = time.time()
 
         if not success:
             break
 
-        (
-            annotated_frame,
-            yolo_result,
-        ) = run_yolo(
-            frame
+        frame_index += 1
+
+        yolo_stride = (
+            LIVE_YOLO_EVERY_N_FRAMES_DURING_VLM
+            if analysis_running
+            else LIVE_YOLO_EVERY_N_FRAMES
         )
 
-        current_state = (
-            build_yolo_world_state(
-                frame,
+        run_detection_now = (
+            last_yolo_result is None
+            or frame_index
+            % yolo_stride
+            == 0
+        )
+
+        if run_detection_now:
+
+            (
+                annotated_frame,
                 yolo_result,
-                "camera",
+            ) = run_yolo(
+                frame
             )
-        )
 
-        current_detections = (
-            current_state.data.get(
-                "detections",
-                [],
+            current_state = (
+                build_yolo_world_state(
+                    frame,
+                    yolo_result,
+                    "camera",
+                    timestamp=frame_timestamp,
+                )
             )
-        )
 
-        image_width = (
-            current_state.data.get(
-                "image_width",
-                frame.shape[1],
+            all_current_detections = (
+                current_state.data.get(
+                    "detections",
+                    [],
+                )
             )
-        )
 
-        image_height = (
-            current_state.data.get(
-                "image_height",
-                frame.shape[0],
+            # Draw all YOLO detections, but only reliable detections
+            # are allowed to drive temporal motion / trajectory.
+            current_detections = (
+                track_observation(current_state)
             )
-        )
 
-        current_detection_time = (
-            time.time()
-        )
-
-        motion_evidence = (
-            calculate_temporal_motion(
-                previous_detections,
-                current_detections,
-                image_width,
-                image_height,
-                previous_detection_time,
-                current_detection_time,
+            image_width = (
+                current_state.data.get(
+                    "image_width",
+                    frame.shape[1],
+                )
             )
-        )
 
-        previous_detections = (
-            current_detections
-        )
+            image_height = (
+                current_state.data.get(
+                    "image_height",
+                    frame.shape[0],
+                )
+            )
 
-        previous_detection_time = (
-            current_detection_time
-        )
+            current_detection_time = current_state.timestamp
+
+            motion_evidence = (
+                calculate_temporal_motion(
+                    previous_detections,
+                    current_detections,
+                    image_width,
+                    image_height,
+                    previous_detection_time,
+                    current_detection_time,
+                )
+            )
+
+            previous_detections = (
+                current_detections
+            )
+
+            previous_detection_time = (
+                current_detection_time
+            )
+
+            update_live_temporal_prediction(
+                current_state
+            )
+
+            last_yolo_result = (
+                yolo_result
+            )
+
+            last_current_state = (
+                current_state
+            )
+
+            last_annotated_frame = (
+                annotated_frame
+            )
+
+        else:
+
+            # Do not run YOLO on this frame. Show the fresh camera frame
+            # instead of blocking capture. The latest stable temporal state
+            # remains available until the next detection frame.
+            annotated_frame = frame.copy()
+            yolo_result = (
+                last_yolo_result
+            )
+            current_state = (
+                last_current_state
+            )
+            motion_evidence = list(
+                latest_stable_motion_evidence
+            )
 
         current_time = (
             time.time()
@@ -1505,7 +1884,10 @@ def run_live_camera():
         )
 
         if (
-            camera_age
+            run_detection_now
+            and yolo_result is not None
+            and not analysis_running
+            and camera_age
             >= CAMERA_WARMUP_SECONDS
             and
             current_time
@@ -1513,18 +1895,17 @@ def run_live_camera():
             >= DESCRIPTION_INTERVAL_SECONDS
         ):
 
-            # IMPORTANT:
-            # Do NOT replace the old description with
-            # "Analyzing..." here.
-            #
-            # The last stable description remains visible
-            # until the new analysis is actually ready.
-
+            # Deep scene analysis stays in its background worker.
+            # While SmolVLM is active, live YOLO automatically runs
+            # less often to reduce GPU contention and camera stutter.
             analyze_background(
                 frame,
                 yolo_result,
                 "camera",
-                motion_evidence,
+                list(
+                    latest_stable_motion_evidence
+                ),
+                world_state=current_state,
             )
 
             last_analysis = (
@@ -1660,6 +2041,7 @@ def open_video():
     global latest_description
     global latest_reasoning
     global latest_motion_evidence
+    global latest_stable_motion_evidence
     global latest_motion_summary
     global description_last_changed_at
     global reasoning_last_changed_at
@@ -1703,6 +2085,7 @@ def open_video():
     }
 
     latest_motion_evidence = []
+    latest_stable_motion_evidence = []
 
     latest_motion_summary = (
         "collecting_temporal_evidence"
@@ -1732,6 +2115,7 @@ def open_video():
         success, frame = (
             cap.read()
         )
+        frame_timestamp = time.time()
 
         if not success:
             break
@@ -1748,19 +2132,15 @@ def open_video():
                 frame,
                 yolo_result,
                 "video",
+                timestamp=frame_timestamp,
             )
         )
 
         current_detections = (
-            current_state.data.get(
-                "detections",
-                [],
-            )
+            track_observation(current_state)
         )
 
-        current_detection_time = (
-            time.time()
-        )
+        current_detection_time = current_state.timestamp
 
         motion_evidence = (
             calculate_temporal_motion(
@@ -1778,6 +2158,8 @@ def open_video():
                 current_detection_time,
             )
         )
+
+        update_live_temporal_prediction(current_state)
 
         previous_detections = (
             current_detections
@@ -1801,7 +2183,8 @@ def open_video():
                 frame,
                 yolo_result,
                 "video",
-                motion_evidence,
+                list(latest_stable_motion_evidence),
+                world_state=current_state,
             )
 
             last_analysis = (

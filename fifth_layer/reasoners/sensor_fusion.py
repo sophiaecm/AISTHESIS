@@ -1,5 +1,8 @@
 """Sensor fusion reasoning for Fifth Layer Engine."""
 
+from fifth_layer.reasoners.occlusion_context import occlusion_context
+
+
 from fifth_layer.world_state import WorldState
 from fifth_layer.expected_consequences import ExpectedConsequences
 from fifth_layer.latent_state import LatentState
@@ -236,6 +239,16 @@ class SensorFusionReasoner(BaseReasoner):
         # Generic occlusion output
         # --------------------------------------------------
 
+        context = occlusion_context(data)
+        if context is not None:
+            hypotheses, latent_objects = context
+            # Same visual evidence: merge by maximum, do not count another sensor.
+            generic_occlusion_scores.extend(
+                item["occlusion_probability"] for item in hypotheses
+                if item["occlusion_probability"] > 0
+            )
+            predictions["possible_occluded_object_count"] = len(latent_objects)
+
         if generic_occlusion_scores:
 
             strongest_generic = max(
@@ -263,7 +276,12 @@ class SensorFusionReasoner(BaseReasoner):
             ] = 0.0
 
         # --------------------------------------------------
-        # Actor-specific occlusion contribution
+        # Visible actor-overlap diagnostic
+        # --------------------------------------------------
+        #
+        # A visible actor overlapping another visible object
+        # is NOT evidence that an additional hidden actor exists.
+        # Keep this only as a visibility/occlusion diagnostic.
         # --------------------------------------------------
 
         if actor_occlusion_scores:
@@ -272,12 +290,25 @@ class SensorFusionReasoner(BaseReasoner):
                 actor_occlusion_scores
             )
 
-            hidden_actor_evidence.append(
+            predictions[
+                "visible_actor_occlusion_probability"
+            ] = round(
+                strongest_actor_occlusion,
+                3,
+            )
+
+            generic_evidence.append(
                 {
-                    "source": "actor_occlusion",
+                    "source": "visible_actor_occlusion",
                     "confidence": strongest_actor_occlusion,
                 }
             )
+
+        else:
+
+            predictions[
+                "visible_actor_occlusion_probability"
+            ] = 0.0
 
         # --------------------------------------------------
         # 5. Semantic evidence
@@ -482,7 +513,7 @@ class SensorFusionReasoner(BaseReasoner):
 
             future_data[
                 "predicted_event"
-            ] = "actor_may_emerge"
+            ] = "hidden_actor_may_emerge"
 
             future_data[
                 "risk_level"
@@ -492,7 +523,7 @@ class SensorFusionReasoner(BaseReasoner):
 
             future_data[
                 "predicted_event"
-            ] = "actor_may_emerge"
+            ] = "hidden_actor_may_emerge"
 
             future_data[
                 "risk_level"

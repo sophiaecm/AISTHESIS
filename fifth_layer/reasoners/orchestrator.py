@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 from fifth_layer.reasoners.semantic_conflict import SemanticConflictReasoner
 from fifth_layer.reasoners.active_perception import ActivePerceptionReasoner
 from fifth_layer.reasoners.occlusion import OcclusionReasoner
@@ -96,6 +98,17 @@ class AisthesisOrchestrator:
             )
         )
 
+        # Export only occlusion-derived fields, never the full latent WorldState.
+        downstream_state = WorldState(
+            timestamp=world_state.timestamp,
+            data=deepcopy(world_state.data),
+        )
+        downstream_state.data["occlusion_reasoning"] = {
+            "expected": deepcopy(occlusion_expected.predictions),
+            "latent": deepcopy(occlusion_latent.features.get(
+                "latent_occlusion_state", {})),
+        }
+
         # --------------------------------------------------
         # 4. Scene Reasoning
         # --------------------------------------------------
@@ -129,14 +142,14 @@ class AisthesisOrchestrator:
         temporal_expected = (
             self.temporal_prediction_reasoner
             .infer_expected_consequences(
-                world_state
+                downstream_state
             )
         )
 
         temporal_latent = (
             self.temporal_prediction_reasoner
             .infer_latent_state(
-                world_state,
+                downstream_state,
                 temporal_expected,
             )
         )
@@ -155,14 +168,14 @@ class AisthesisOrchestrator:
         fusion_expected = (
             self.sensor_fusion_reasoner
             .infer_expected_consequences(
-                world_state
+                downstream_state
             )
         )
 
         fusion_latent = (
             self.sensor_fusion_reasoner
             .infer_latent_state(
-                world_state,
+                downstream_state,
                 fusion_expected,
             )
         )
