@@ -57,11 +57,17 @@ def extract_motion_evidence(
     image_width,
     image_height,
     delta_time=None,
+    minimum_motion_pixels=0.0,
+    minimum_normalized_motion=0.005,
 ):
     """
     Estimate object motion between two frames.
 
+    Optional motion deadbands affect classification only; raw displacement and
+    velocity remain available. Defaults preserve legacy behavior.
+
     Objects are matched using:
+    Track IDs, when supplied, must agree. Legacy inputs use:
     1. Same class
     2. Nearest center
     3. Maximum normalized matching distance
@@ -70,6 +76,9 @@ def extract_motion_evidence(
     full persistent multi-object tracking.
     """
 
+    # Estimated positions are not new visual motion evidence.
+    previous_detections = [d for d in previous_detections if not d.get("is_predicted")]
+    current_detections = [d for d in current_detections if not d.get("is_predicted")]
     evidence = []
 
     if not previous_detections:
@@ -198,7 +207,8 @@ def extract_motion_evidence(
             / image_diagonal
         )
 
-        if normalized_motion < 0.005:
+        if pixel_distance < max(minimum_motion_pixels,
+                                minimum_normalized_motion * image_diagonal):
             motion_state = "stationary"
 
         elif abs(dx) >= abs(dy):

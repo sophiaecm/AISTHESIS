@@ -1,3 +1,4 @@
+from fifth_layer.perception.track_prediction import prediction_context
 """Occlusion reasoning for Fifth Layer Engine."""
 
 
@@ -24,6 +25,9 @@ class OcclusionReasoner(BaseReasoner):
         predictions = {
             "occlusion_hypotheses": []
         }
+
+        if "predicted_tracks" in world_state.data:
+            predictions["predicted_track_context"] = prediction_context(world_state.data, world_state.timestamp)
 
         for item in evidence:
             probability = 0.0

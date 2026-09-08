@@ -1,4 +1,7 @@
 import os
+import json
+import logging
+from logging.handlers import RotatingFileHandler
 import tempfile
 import threading
 import time
@@ -10,6 +13,7 @@ from collections import Counter, deque
 import cv2
 from ultralytics import YOLO
 
+from fifth_layer.perception.live_inference import LiveInferenceWorker
 from fifth_layer.world_state import WorldState
 from fifth_layer.perception.analysis_snapshot import AnalysisSnapshot
 from fifth_layer.perception.tracking import ObjectTracker
@@ -63,11 +67,33 @@ smolvlm_model = None
 
 smolvlm_lock = threading.Lock()
 model_load_lock = threading.Lock()
+yolo_lock = threading.Lock()
 
 perception_fusion = PerceptionFusion()
 orchestrator = AisthesisOrchestrator()
 temporal_reasoner = TemporalPredictionReasoner()
-object_tracker = ObjectTracker()
+# Temporary diagnostic log: at most three 512 KiB files; no per-frame UI output.
+track_logger = logging.getLogger("aisthesis.tracks")
+track_logger.setLevel(logging.INFO)
+track_logger.propagate = False
+if not track_logger.handlers:
+    track_handler = RotatingFileHandler(
+        os.path.join(tempfile.gettempdir(), "aisthesis-tracks.log"),
+        maxBytes=512 * 1024, backupCount=2, encoding="utf-8",
+    )
+    track_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+    track_logger.addHandler(track_handler)
+
+
+def log_track_event(event, **fields):
+    track_logger.info("%s %s", event, json.dumps(fields, ensure_ascii=True))
+
+
+object_tracker = ObjectTracker(
+    preserve_observation_continuity=True, observation_expiration=True,
+    min_confidence=LIVE_MIN_TRACK_CONFIDENCE, event_logger=log_track_event,
+    predict_missing_tracks=True,
+)
 prediction_feedback = PredictionFeedback()
 
 
@@ -140,21 +166,17 @@ def load_smolvlm():
 # YOLO
 # ---------------------------------------------------------
 
+def infer_yolo(frame):
+    # Serialize model access across live, photo and video sessions.
+    with yolo_lock:
+        return yolo_model.predict(
+            source=frame, conf=CONFIDENCE_THRESHOLD, device=0, verbose=False,
+        )[0]
+
+
 def run_yolo(frame):
-
-    results = yolo_model.predict(
-        source=frame,
-        conf=CONFIDENCE_THRESHOLD,
-        device=0,
-        verbose=False,
-    )
-
-    result = results[0]
-
-    return (
-        result.plot(),
-        result,
-    )
+    result = infer_yolo(frame)
+    return result.plot(), result
 
 
 # ---------------------------------------------------------
@@ -231,6 +253,21 @@ def build_yolo_world_state(
             "model": MODEL_PATH,
         },
     )
+
+
+def draw_tracked_detections(frame, detections):
+    """Draw only actual detections, with session identities when available."""
+    annotated = frame.copy()
+    for detection in detections:
+        x1, y1, x2, y2 = map(int, detection["box_xyxy"])
+        identity = detection.get("track_id")
+        suffix = f" #{identity}" if identity is not None else ""
+        label = (f"{detection.get('class_name', 'unknown')}{suffix} "
+                 f"{float(detection.get('confidence', 0.0)):.2f}")
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.putText(annotated, label, (x1, max(15, y1 - 7)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+    return annotated
 
 
 # ---------------------------------------------------------
@@ -516,6 +553,7 @@ def update_smoothed_motion(
     # Until a short history exists, do not expose motion
     # to the predictive reasoner.
     if len(motion_history) < 3:
+        latest_motion_summary = "collecting_temporal_evidence"
         latest_stable_motion_evidence = []
         return
 
@@ -541,6 +579,7 @@ def update_smoothed_motion(
     )
 
     if votes < required_votes:
+        latest_motion_summary = "motion_unconfirmed"
         latest_stable_motion_evidence = []
         return
 
@@ -593,6 +632,7 @@ def update_smoothed_motion(
     ]
 
     if not raw_matches:
+        latest_motion_summary = "motion_unconfirmed"
         latest_stable_motion_evidence = []
         return
 
@@ -677,13 +717,14 @@ def filter_live_tracking_detections(
 def track_observation(current_state):
     data = current_state.data
     visible = object_tracker.update(
-        filter_live_tracking_detections(data.get("detections", [])),
+        data.get("detections", []),
         current_state.timestamp, data["image_width"], data["image_height"],
     )
-    identities = {item["object_id"]: item["track_id"] for item in visible}
-    for detection in data.get("detections", []):
-        if detection["object_id"] in identities:
-            detection["track_id"] = identities[detection["object_id"]]
+    data["detections"] = visible
+    data["accepted_detections"] = visible
+    data["detection_count"] = len(visible)
+    data["predicted_tracks"] = list(object_tracker.predicted_tracks)
+    visible = filter_live_tracking_detections(visible)
     data["prediction_feedback"] = prediction_feedback.observe(
         current_state.timestamp, visible, data["image_width"], data["image_height"],
     )
@@ -734,6 +775,8 @@ def calculate_temporal_motion(
             image_width=image_width,
             image_height=image_height,
             delta_time=delta_time,
+            minimum_motion_pixels=8.0,
+            minimum_normalized_motion=0.01,
         )
     )
 
@@ -1427,6 +1470,8 @@ def get_display_reasoning():
 
 def draw_overlay(
     frame,
+    detections=None,
+    predicted_tracks=None,
 ):
 
     description = (
@@ -1469,7 +1514,7 @@ def draw_overlay(
         latest_motion_summary
     )
     evaluated = [item for item in prediction_feedback.history if item["status"] == "evaluated"]
-    if evaluated:
+    if evaluated and latest_stable_motion_evidence:
         motion += f" | error: {evaluated[-1]['error_pixels']:.1f}px"
 
 
@@ -1662,6 +1707,15 @@ def draw_overlay(
         cv2.LINE_AA,
     )
 
+    for prediction in predicted_tracks or []:
+        if time.time() > prediction["prediction_valid_until"]:
+            continue
+        x1, y1, x2, y2 = map(int, prediction["predicted_bbox"])
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 165, 255), 1)
+        cv2.putText(frame, f"PREDICTED {prediction['class_name']} #{prediction['track_id']}",
+                    (x1, max(15, y1-7)), cv2.FONT_HERSHEY_SIMPLEX, .6, (0, 165, 255), 1)
+    if detections is not None:
+        frame = draw_tracked_detections(frame, detections)
     return frame
 
 
@@ -1747,193 +1801,60 @@ def run_live_camera():
     )
 
     frame_index = 0
-    last_yolo_result = None
-    last_current_state = None
-    last_annotated_frame = None
+    current_state = None
+    inference = LiveInferenceWorker(infer_yolo)
+    try:
+        while True:
+            success, frame = cap.read()
+            frame_timestamp = time.time()
+            if not success:
+                break
+            frame_index += 1
+            completed = inference.poll()
+            if completed is not None:
+                observed_frame, observed_at, yolo_result, error = completed
+                if error is not None:
+                    print("Live YOLO error:", error)
+                else:
+                    current_state = build_yolo_world_state(
+                        observed_frame, yolo_result, "camera", timestamp=observed_at,
+                    )
+                    current_detections = track_observation(current_state)
+                    calculate_temporal_motion(
+                        previous_detections, current_detections,
+                        current_state.data["image_width"], current_state.data["image_height"],
+                        previous_detection_time, observed_at,
+                    )
+                    previous_detections = current_detections
+                    previous_detection_time = observed_at
+                    update_live_temporal_prediction(current_state)
+                    now = time.time()
+                    if (not analysis_running
+                            and now - camera_started_at >= CAMERA_WARMUP_SECONDS
+                            and now - last_analysis >= DESCRIPTION_INTERVAL_SECONDS):
+                        analyze_background(
+                            observed_frame, yolo_result, "camera",
+                            list(latest_stable_motion_evidence), world_state=current_state,
+                        )
+                        last_analysis = now
 
-    while True:
+            stride = (LIVE_YOLO_EVERY_N_FRAMES_DURING_VLM if analysis_running
+                      else LIVE_YOLO_EVERY_N_FRAMES)
+            if current_state is None or frame_index % stride == 0:
+                inference.submit(frame, frame_timestamp)
 
-        success, frame = (
-            cap.read()
-        )
-        frame_timestamp = time.time()
-
-        if not success:
-            break
-
-        frame_index += 1
-
-        yolo_stride = (
-            LIVE_YOLO_EVERY_N_FRAMES_DURING_VLM
-            if analysis_running
-            else LIVE_YOLO_EVERY_N_FRAMES
-        )
-
-        run_detection_now = (
-            last_yolo_result is None
-            or frame_index
-            % yolo_stride
-            == 0
-        )
-
-        if run_detection_now:
-
-            (
-                annotated_frame,
-                yolo_result,
-            ) = run_yolo(
-                frame
-            )
-
-            current_state = (
-                build_yolo_world_state(
-                    frame,
-                    yolo_result,
-                    "camera",
-                    timestamp=frame_timestamp,
-                )
-            )
-
-            all_current_detections = (
-                current_state.data.get(
-                    "detections",
-                    [],
-                )
-            )
-
-            # Draw all YOLO detections, but only reliable detections
-            # are allowed to drive temporal motion / trajectory.
-            current_detections = (
-                track_observation(current_state)
-            )
-
-            image_width = (
-                current_state.data.get(
-                    "image_width",
-                    frame.shape[1],
-                )
-            )
-
-            image_height = (
-                current_state.data.get(
-                    "image_height",
-                    frame.shape[0],
-                )
-            )
-
-            current_detection_time = current_state.timestamp
-
-            motion_evidence = (
-                calculate_temporal_motion(
-                    previous_detections,
-                    current_detections,
-                    image_width,
-                    image_height,
-                    previous_detection_time,
-                    current_detection_time,
-                )
-            )
-
-            previous_detections = (
-                current_detections
-            )
-
-            previous_detection_time = (
-                current_detection_time
-            )
-
-            update_live_temporal_prediction(
-                current_state
-            )
-
-            last_yolo_result = (
-                yolo_result
-            )
-
-            last_current_state = (
-                current_state
-            )
-
-            last_annotated_frame = (
-                annotated_frame
-            )
-
-        else:
-
-            # Do not run YOLO on this frame. Show the fresh camera frame
-            # instead of blocking capture. The latest stable temporal state
-            # remains available until the next detection frame.
-            annotated_frame = frame.copy()
-            yolo_result = (
-                last_yolo_result
-            )
-            current_state = (
-                last_current_state
-            )
-            motion_evidence = list(
-                latest_stable_motion_evidence
-            )
-
-        current_time = (
-            time.time()
-        )
-
-        camera_age = (
-            current_time
-            - camera_started_at
-        )
-
-        if (
-            run_detection_now
-            and yolo_result is not None
-            and not analysis_running
-            and camera_age
-            >= CAMERA_WARMUP_SECONDS
-            and
-            current_time
-            - last_analysis
-            >= DESCRIPTION_INTERVAL_SECONDS
-        ):
-
-            # Deep scene analysis stays in its background worker.
-            # While SmolVLM is active, live YOLO automatically runs
-            # less often to reduce GPU contention and camera stutter.
-            analyze_background(
-                frame,
-                yolo_result,
-                "camera",
-                list(
-                    latest_stable_motion_evidence
-                ),
-                world_state=current_state,
-            )
-
-            last_analysis = (
-                current_time
-            )
-
-        annotated_frame = (
-            draw_overlay(
-                annotated_frame
-            )
-        )
-
-        cv2.imshow(
-            "AISTHESIS Live",
-            annotated_frame,
-        )
-
-        key = (
-            cv2.waitKey(1)
-            & 0xFF
-        )
-
-        if key == ord("q"):
-            break
-
-    cap.release()
-
-    cv2.destroyAllWindows()
+            # Reuse actual last-observed boxes between completed inferences.
+            # This display cache never updates tracking or predicts missing boxes.
+            detections = current_state.data["detections"] if current_state else []
+            annotated_frame = draw_overlay(frame.copy(), detections,
+                                           current_state.data.get("predicted_tracks", []) if current_state else [])
+            cv2.imshow("AISTHESIS Live", annotated_frame)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
+    finally:
+        inference.close()
+        cap.release()
+        cv2.destroyAllWindows()
 
 
 # ---------------------------------------------------------
@@ -2140,6 +2061,8 @@ def open_video():
             track_observation(current_state)
         )
 
+        annotated_frame = frame.copy()
+
         current_detection_time = current_state.timestamp
 
         motion_evidence = (
@@ -2193,7 +2116,7 @@ def open_video():
 
         annotated_frame = (
             draw_overlay(
-                annotated_frame
+                annotated_frame, current_state.data["detections"], current_state.data.get("predicted_tracks", [])
             )
         )
 

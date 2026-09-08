@@ -1,3 +1,4 @@
+from fifth_layer.perception.track_prediction import prediction_context
 """Temporal and occlusion-aware trajectory reasoning for AISTHESIS."""
 
 from fifth_layer.reasoners.occlusion_context import occlusion_context
@@ -603,6 +604,9 @@ class TemporalPredictionReasoner(BaseReasoner):
             "trajectory_available": False,
             "occlusion_aware": True,
         }
+
+        if "predicted_tracks" in world_state.data:
+            predictions["predicted_track_context"] = prediction_context(world_state.data, world_state.timestamp)
 
         if not motion_evidence:
 

@@ -11,6 +11,8 @@ class WorldState:
     Attributes:
         timestamp: When this state was observed, if known.
         data: Arbitrary observed values (e.g. sensor readings, features).
+            Optional predicted_tracks contains bounded position estimates only;
+            it is separate from detections/accepted_detections and object counts.
     """
 
     timestamp: Optional[float] = None

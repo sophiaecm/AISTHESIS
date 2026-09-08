@@ -3,3 +3,21 @@ __pycache__/
 .venv/
 models/
 test_image.jpg
+# Local models and generated outputs
+*.pt
+*.pth
+*.onnx
+*.safetensors
+runs/
+test.jpg
+
+# Local configuration and logs
+.env
+*.log
+
+# Temporary live_app backups
+live_app_backup.py
+live_app_before_*.py
+live_app_before_*.py#
+live_app_*_working.py
+live_app_stable_temporal.py

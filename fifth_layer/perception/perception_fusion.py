@@ -173,6 +173,8 @@ class PerceptionFusion:
 
                 "image_height": image_height,
 
+                **({"predicted_tracks": yolo_data["predicted_tracks"]} if "predicted_tracks" in yolo_data else {}),
+                **({"accepted_detections": detections} if "accepted_detections" in yolo_data else {}),
                 "detections": detections,
 
                 "detection_count": yolo_data.get(
