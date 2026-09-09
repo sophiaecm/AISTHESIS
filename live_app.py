@@ -18,6 +18,7 @@ from fifth_layer.world_state import WorldState
 from fifth_layer.perception.analysis_snapshot import AnalysisSnapshot
 from fifth_layer.perception.tracking import ObjectTracker
 from fifth_layer.prediction_feedback import PredictionFeedback
+from fifth_layer.prediction_evaluation import PredictionEvaluationMemory, evaluation_overlay
 from fifth_layer.perception.smolvlm_scene import SmolVLMScenePerception
 from fifth_layer.perception.perception_fusion import PerceptionFusion
 from fifth_layer.perception.temporal import extract_motion_evidence
@@ -95,6 +96,7 @@ object_tracker = ObjectTracker(
     predict_missing_tracks=True,
 )
 prediction_feedback = PredictionFeedback()
+prediction_evaluations = PredictionEvaluationMemory(event_logger=log_track_event)
 
 
 # ---------------------------------------------------------
@@ -469,6 +471,7 @@ def reset_motion_smoothing():
 
     object_tracker.reset()
     prediction_feedback.reset()
+    prediction_evaluations.reset()
     motion_history.clear()
     latest_stable_motion_evidence = []
 
@@ -724,10 +727,11 @@ def track_observation(current_state):
     data["accepted_detections"] = visible
     data["detection_count"] = len(visible)
     data["predicted_tracks"] = list(object_tracker.predicted_tracks)
+    data["prediction_evaluations"] = prediction_evaluations.observe(
+        current_state.timestamp, visible, data["image_width"], data["image_height"])
+    data["evaluation_predictions"] = prediction_evaluations.record_state(current_state, {}, "occlusion_track")
     visible = filter_live_tracking_detections(visible)
-    data["prediction_feedback"] = prediction_feedback.observe(
-        current_state.timestamp, visible, data["image_width"], data["image_height"],
-    )
+    data["prediction_feedback"] = data["prediction_evaluations"]
     return visible
 
 
@@ -880,7 +884,7 @@ def update_live_temporal_prediction(
     ] = True
 
     temporal_state = WorldState(
-        timestamp=time.time(),
+        timestamp=current_state.timestamp,
         data=temporal_data,
     )
 
@@ -906,11 +910,8 @@ def update_live_temporal_prediction(
         )
     )
 
-    prediction_feedback.record(
-        current_state.timestamp,
-        temporal_data["strongest_motion"].get("track_id"),
-        expected.predictions.get("predicted_center_1s"),
-    )
+    current_state.data.setdefault("evaluation_predictions", []).extend(
+        prediction_evaluations.record_state(temporal_state, expected.predictions, "temporal_live"))
 
     latent_name = latent.features.get(
         "latent_temporal_state",
@@ -1181,6 +1182,8 @@ def analyze_existing_yolo_result(
                 {},
             )
         )
+
+        prediction_evaluations.record_state(fused_state, temporal.get("expected", {}), "temporal_deep")
 
         temporal_future = (
             temporal.get(
@@ -1513,9 +1516,7 @@ def draw_overlay(
     motion = (
         latest_motion_summary
     )
-    evaluated = [item for item in prediction_feedback.history if item["status"] == "evaluated"]
-    if evaluated and latest_stable_motion_evidence:
-        motion += f" | error: {evaluated[-1]['error_pixels']:.1f}px"
+    evaluation_line = evaluation_overlay(prediction_evaluations.latest(time.time()))
 
 
     max_chars = 65
@@ -1563,7 +1564,7 @@ def draw_overlay(
     lines = lines[:4]
 
     panel_height = (
-        200
+        227
         + len(lines)
         * 25
     )
@@ -1706,6 +1707,10 @@ def draw_overlay(
         1,
         cv2.LINE_AA,
     )
+
+    if evaluation_line:
+        cv2.putText(frame, evaluation_line, (20, y + 27), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.50, (255, 255, 255), 1, cv2.LINE_AA)
 
     for prediction in predicted_tracks or []:
         if time.time() > prediction["prediction_valid_until"]:

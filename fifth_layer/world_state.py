@@ -13,6 +13,8 @@ class WorldState:
         data: Arbitrary observed values (e.g. sensor readings, features).
             Optional predicted_tracks contains bounded position estimates only;
             it is separate from detections/accepted_detections and object counts.
+            Optional evaluation_predictions and prediction_evaluations hold
+            measurement-only forecast records and finalized comparison results.
     """
 
     timestamp: Optional[float] = None

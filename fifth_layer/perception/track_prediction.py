@@ -49,6 +49,8 @@ def predict_missing(track, timestamp, width, height, visible=()):
     if age > limit:
         return None
     return dict(track_id=track['track_id'], class_name=track['class_name'],
+                origin_center=list(track['center']), origin_bbox=list(track['bbox']),
+                predicted_motion_direction=('stationary' if not reliable or hypot(vx, vy) < 1 else 'moving'),
                 observation_state='predicted', is_predicted=True,
                 prediction_age_seconds=age, predicted_center=[cx, cy], predicted_bbox=bbox,
                 position_uncertainty=2.0 + age * (10.0 if reliable else 25.0),

@@ -10,6 +10,78 @@ from test_analysis_connections import live_functions
 
 
 class LiveIntegrationTests(unittest.TestCase):
+    def test_evaluation_reaches_overlay_before_camera_loop_closes(self):
+        from fifth_layer.perception.tracking import TrackMemory
+        from fifth_layer.prediction_evaluation import PredictionEvaluationMemory
+
+        for x, status in [(105, 'correct'), (180, 'partially_correct'), (300, 'incorrect')]:
+            with self.subTest(status=status):
+                env = live_functions('run_live_camera', 'track_observation',
+                                     'filter_live_tracking_detections', 'draw_overlay')
+                memory = PredictionEvaluationMemory()
+                tracker = TrackMemory(max_distance=1, predict_missing_tracks=True)
+                frame = np.zeros((800, 600, 3))
+                states = [WorldState(t, dict(image_width=600, image_height=800,
+                    detections=[dict(class_name='person', confidence=.9,
+                                     box_xyxy=[cx-10, 90, cx+10, 110])]))
+                    for t, cx in [(0, 100), (1.25, x)]]
+                clock = [0.0]
+                worker, cv = Mock(), Mock()
+                forecast_ids, rendered = [], []
+                worker.poll.side_effect = [(frame, 0, object(), None),
+                                           (frame, 1.25, object(), None), None]
+                def read():
+                    clock[0] = [0, 1.25, 1.30][cv.VideoCapture.return_value.read.call_count-1]
+                    return True, frame
+                cv.VideoCapture.return_value.read.side_effect = read
+
+                def forecast(state):
+                    if state.timestamp == 0:
+                        records = memory.record_state(state, dict(
+                            track_id=state.data['detections'][0]['track_id'],
+                            motion_state='stationary', trajectory=[dict(
+                                center=[100, 100], horizon_seconds=1)]), 'temporal_live')
+                        forecast_ids.append(records[0]['prediction_id'])
+                        self.assertEqual(len(memory.pending), 1)
+                    else:
+                        # observe() must finalize before the overlay or shutdown.
+                        self.assertFalse(memory.pending)
+                        self.assertEqual(state.data['prediction_evaluations'][0]['status'], status)
+                        worker.close.assert_not_called()
+
+                def wait_key(_):
+                    iteration = cv.waitKey.call_count
+                    worker.close.assert_not_called()
+                    cv.VideoCapture.return_value.release.assert_not_called()
+                    labels = [call.args[1] for call in cv.putText.call_args_list
+                              if call.args[1].startswith('EVAL:')]
+                    if iteration == 1:
+                        self.assertFalse(labels)
+                        self.assertEqual(len(memory.pending), 1)
+                    else:
+                        self.assertEqual(len(memory.history), 1)
+                        self.assertEqual(memory.history[0]['prediction_id'], forecast_ids[0])
+                        self.assertEqual(memory.history[0]['observation']['observation_state'], 'observed')
+                        self.assertEqual(labels[-1], f'EVAL: {status} | error {x-100:.1f}px')
+                        rendered.append(labels[-1])
+                    return ord('q') if iteration == 3 else -1
+
+                cv.waitKey.side_effect = wait_key
+                env.update(cv2=cv, time=Mock(time=lambda: clock[0]), CAMERA_INDEX=0,
+                    reset_motion_smoothing=lambda: (tracker.reset(), memory.reset()),
+                    object_tracker=tracker, prediction_evaluations=memory,
+                    LIVE_MIN_TRACK_CONFIDENCE=.5,
+                    LiveInferenceWorker=Mock(return_value=worker), infer_yolo=Mock(),
+                    build_yolo_world_state=Mock(side_effect=states),
+                    calculate_temporal_motion=Mock(), update_live_temporal_prediction=forecast,
+                    analysis_running=True, LIVE_YOLO_EVERY_N_FRAMES=2,
+                    LIVE_YOLO_EVERY_N_FRAMES_DURING_VLM=4,
+                    get_display_reasoning=lambda: {}, draw_tracked_detections=lambda f, d: f)
+                env['run_live_camera']()
+                self.assertEqual(len(rendered), 2)
+                worker.close.assert_called_once()
+                cv.VideoCapture.return_value.release.assert_called_once()
+
     def test_worker_does_not_wait_for_slow_model_or_close(self):
         entered, release, finished = threading.Event(), threading.Event(), threading.Event()
         def infer(frame):

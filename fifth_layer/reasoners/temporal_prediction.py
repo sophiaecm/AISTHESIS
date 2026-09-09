@@ -662,6 +662,7 @@ class TemporalPredictionReasoner(BaseReasoner):
         current_center = strongest.get(
             "current_center"
         )
+        predictions["track_id"] = strongest.get("track_id")
 
         velocity_x = strongest.get(
             "velocity_x"

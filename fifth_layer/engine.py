@@ -47,8 +47,14 @@ class FifthLayerEngine:
             "future_state": future_state,
         }
 
-    def compare(self, observed: WorldState) -> PredictionError:
+    def compare(self, observed: WorldState, *, prediction=None, observation=None, evaluated_timestamp=None) -> PredictionError:
         """Compare a later observation with the most recent FutureState."""
+
+        if prediction is not None:
+            from fifth_layer.prediction_evaluation import compare_prediction
+            return PredictionError(details=compare_prediction(
+                prediction, observation,
+                observed.timestamp if evaluated_timestamp is None else evaluated_timestamp))
 
         if self.last_future_state is None:
             raise ValueError(
