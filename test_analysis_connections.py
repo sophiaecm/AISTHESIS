@@ -21,10 +21,11 @@ def live_functions(*names):
     tree.body = [node for node in tree.body
                  if isinstance(node, ast.FunctionDef) and node.name in names]
     from fifth_layer.prediction_evaluation import PredictionEvaluationMemory, evaluation_overlay
+    from fifth_layer.confidence_calibration import calibration_overlay
     import time
     env = {"AnalysisSnapshot": AnalysisSnapshot,
            "prediction_evaluations": PredictionEvaluationMemory(),
-           "evaluation_overlay": evaluation_overlay, "time": time}
+           "evaluation_overlay": evaluation_overlay, "calibration_overlay": calibration_overlay, "time": time}
     exec(compile(tree, "live_app.py", "exec"), env)
     return env
 

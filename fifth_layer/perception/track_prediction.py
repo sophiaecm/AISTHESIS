@@ -9,6 +9,7 @@ MAX_RELIABLE_VELOCITY_INTERVAL_SECONDS = 1.5
 MAX_NORMALIZED_PREDICTION_SPEED = 0.5
 MAX_RELIABLE_SIZE_CHANGE = 0.25
 MIN_VELOCITY_INTERVAL_SECONDS = 0.02
+OCCLUSION_RAW_PREDICTION_CONFIDENCE = 0.50
 
 
 def reliable_velocity(old, bbox, dt, velocity, width, height):
@@ -49,6 +50,7 @@ def predict_missing(track, timestamp, width, height, visible=()):
     if age > limit:
         return None
     return dict(track_id=track['track_id'], class_name=track['class_name'],
+                raw_confidence=OCCLUSION_RAW_PREDICTION_CONFIDENCE,
                 origin_center=list(track['center']), origin_bbox=list(track['bbox']),
                 predicted_motion_direction=('stationary' if not reliable or hypot(vx, vy) < 1 else 'moving'),
                 observation_state='predicted', is_predicted=True,

@@ -19,6 +19,7 @@ from fifth_layer.perception.analysis_snapshot import AnalysisSnapshot
 from fifth_layer.perception.tracking import ObjectTracker
 from fifth_layer.prediction_feedback import PredictionFeedback
 from fifth_layer.prediction_evaluation import PredictionEvaluationMemory, evaluation_overlay
+from fifth_layer.confidence_calibration import calibration_overlay
 from fifth_layer.perception.smolvlm_scene import SmolVLMScenePerception
 from fifth_layer.perception.perception_fusion import PerceptionFusion
 from fifth_layer.perception.temporal import extract_motion_evidence
@@ -439,6 +440,12 @@ def update_stable_reasoning(
                 1.0,
             ),
         )
+
+        if candidate.get('source') == latest_reasoning.get('source'):
+            for key in ('raw_confidence', 'calibration_reliability',
+                        'calibrated_confidence', 'calibration_samples'):
+                if key in candidate:
+                    latest_reasoning[key] = candidate[key]
 
         return
 
@@ -911,7 +918,7 @@ def update_live_temporal_prediction(
     )
 
     current_state.data.setdefault("evaluation_predictions", []).extend(
-        prediction_evaluations.record_state(temporal_state, expected.predictions, "temporal_live"))
+        prediction_evaluations.record_state(temporal_state, {**expected.predictions, **future.data}, "temporal_live"))
 
     latent_name = latent.features.get(
         "latent_temporal_state",
@@ -966,6 +973,11 @@ def update_live_temporal_prediction(
         "uncertainty": uncertainty,
         "source": "temporal_live",
     }
+    issued = current_state.data.get('evaluation_predictions', [])
+    issued = [p for p in issued if p['source'] == 'temporal_live']
+    if issued:
+        latest_reasoning.update({key: issued[-1][key] for key in (
+            'raw_confidence', 'calibration_reliability', 'calibrated_confidence', 'calibration_samples')})
 
     reasoning_last_changed_at = (
         time.time()
@@ -1183,7 +1195,9 @@ def analyze_existing_yolo_result(
             )
         )
 
-        prediction_evaluations.record_state(fused_state, temporal.get("expected", {}), "temporal_deep")
+        deep_issued = prediction_evaluations.record_state(fused_state,
+            {**temporal.get("expected", {}), **temporal.get("future", {})}, "temporal_deep")
+        fused_state.data['evaluation_predictions'] = deep_issued
 
         temporal_future = (
             temporal.get(
@@ -1347,6 +1361,10 @@ def analyze_existing_yolo_result(
                 "uncertainty": 1.0,
                 "source": "insufficient_evidence",
             }
+
+        if candidate_reasoning.get('source') == 'temporal_deep' and deep_issued:
+            candidate_reasoning.update({key: deep_issued[-1][key] for key in (
+                'raw_confidence', 'calibration_reliability', 'calibrated_confidence', 'calibration_samples')})
 
         update_stable_reasoning(
             candidate_reasoning
@@ -1516,7 +1534,9 @@ def draw_overlay(
     motion = (
         latest_motion_summary
     )
-    evaluation_line = evaluation_overlay(prediction_evaluations.latest(time.time()))
+    latest_evaluation = prediction_evaluations.latest(time.time())
+    evaluation_line = evaluation_overlay(latest_evaluation)
+    calibration_line = calibration_overlay(latest_evaluation)
 
 
     max_chars = 65
@@ -1564,7 +1584,7 @@ def draw_overlay(
     lines = lines[:4]
 
     panel_height = (
-        227
+        254
         + len(lines)
         * 25
     )
@@ -1710,6 +1730,10 @@ def draw_overlay(
 
     if evaluation_line:
         cv2.putText(frame, evaluation_line, (20, y + 27), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.50, (255, 255, 255), 1, cv2.LINE_AA)
+
+    if calibration_line:
+        cv2.putText(frame, calibration_line, (20, y + 54), cv2.FONT_HERSHEY_SIMPLEX,
                     0.50, (255, 255, 255), 1, cv2.LINE_AA)
 
     for prediction in predicted_tracks or []:

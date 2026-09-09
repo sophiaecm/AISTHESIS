@@ -12,6 +12,9 @@ from fifth_layer.latent_state import LatentState
 from fifth_layer.future_state import FutureState
 from fifth_layer.reasoners.base import BaseReasoner
 
+TEMPORAL_RAW_CONFIDENCE = 0.50
+VISIBILITY_RAW_CONFIDENCE = 0.65
+
 
 class TemporalPredictionReasoner(BaseReasoner):
     """
@@ -1073,6 +1076,11 @@ class TemporalPredictionReasoner(BaseReasoner):
                 "latent_temporal_state"
             )
         )
+        # Preserve the live UI's existing raw confidence policy in the reasoner.
+        future_data['raw_confidence'] = (VISIBILITY_RAW_CONFIDENCE if temporal_state in {
+            'trajectory_toward_occlusion', 'visibility_loss_possible',
+            'trajectory_toward_view_exit'} else TEMPORAL_RAW_CONFIDENCE)
+        future_data['prediction_type'] = 'trajectory_position'
 
         class_name = (
             latent_state.features.get(

@@ -15,6 +15,9 @@ class WorldState:
             it is separate from detections/accepted_detections and object counts.
             Optional evaluation_predictions and prediction_evaluations hold
             measurement-only forecast records and finalized comparison results.
+            Forecast records optionally preserve raw_confidence,
+            calibration_reliability and calibrated_confidence at issuance.
+            These fields are prediction metadata, never detector confidence.
     """
 
     timestamp: Optional[float] = None

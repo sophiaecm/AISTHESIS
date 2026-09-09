@@ -1,9 +1,10 @@
-"""Session-only measurement of forecasts; never feeds confidence or reasoning."""
+"""Session measurement; optional calibration affects newly issued forecasts only."""
 from collections import deque
 from copy import deepcopy
 from math import hypot
 from threading import RLock
 from uuid import uuid4
+from fifth_layer.confidence_calibration import ConfidenceCalibrationMemory
 
 from fifth_layer.perception.tracking import _bbox, _iou
 
@@ -15,6 +16,7 @@ DIRECTION_MIN_COSINE = 0.7071067811865476  # 45 degrees
 EVALUATION_GRACE_SECONDS = 0.25
 MEMORY_TTL_SECONDS = 60.0
 MEMORY_MAX_RECORDS = 512
+LEGACY_RAW_PREDICTION_CONFIDENCE = 0.50
 SOURCES = {'temporal_live', 'temporal_deep', 'occlusion_track'}
 
 
@@ -86,6 +88,7 @@ class PredictionEvaluationMemory:
 
     def reset(self):
         with self.lock:
+            self.calibration = ConfidenceCalibrationMemory(event_logger=self.event_logger)
             self.pending = deque()
             self.history = deque(maxlen=self.capacity)
             self.observations = deque(maxlen=self.capacity)
@@ -96,6 +99,7 @@ class PredictionEvaluationMemory:
         if expired:
             result.update(status='expired', evaluation_reason='memory_limit_or_ttl')
         self.history.append(result)
+        self.calibration.update(result)
         if self.event_logger:
             self.event_logger('PREDICTION_EVALUATION', **result)
         return result
@@ -103,6 +107,7 @@ class PredictionEvaluationMemory:
     def advance(self, timestamp):
         with self.lock:
             self.now = max(self.now, timestamp)
+            self.calibration.advance(self.now)
             self.history = deque((r for r in self.history if self.now-r['evaluated_timestamp'] <= self.ttl), maxlen=self.capacity)
             self.observations = deque((o for o in self.observations if self.now-o['observed_timestamp'] <= self.ttl), maxlen=self.capacity)
             remaining, results = deque(), []
@@ -175,6 +180,10 @@ class PredictionEvaluationMemory:
                     if len(self.pending) >= self.capacity:
                         # Discard admission rather than prematurely evaluating a future forecast.
                         continue
+                    p['prediction_type'] = predictions.get('prediction_type', 'occlusion_position' if source == 'occlusion_track' else 'trajectory_position')
+                    raw = predictions.get('raw_confidence', d.get('raw_confidence', LEGACY_RAW_PREDICTION_CONFIDENCE))
+                    p.update(self.calibration.calibrate(raw, source, p['prediction_type'],
+                             p['class_name'], max(state.timestamp, self.now)))
                     self.pending.append(p)
                     added.append(deepcopy(p))
             return added
