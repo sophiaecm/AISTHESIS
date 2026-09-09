@@ -16,6 +16,7 @@ from ultralytics import YOLO
 from fifth_layer.perception.live_inference import LiveInferenceWorker
 from fifth_layer.world_state import WorldState
 from fifth_layer.perception.analysis_snapshot import AnalysisSnapshot
+from fifth_layer.perception.deep_analysis import DeepAnalysisState
 from fifth_layer.perception.tracking import ObjectTracker
 from fifth_layer.prediction_feedback import PredictionFeedback
 from fifth_layer.prediction_evaluation import PredictionEvaluationMemory, evaluation_overlay
@@ -86,6 +87,13 @@ if not track_logger.handlers:
     track_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
     track_logger.addHandler(track_handler)
 
+# Scene/deep diagnostics only; keep high-volume tracking events out of terminal.
+if os.environ.get('AISTHESIS_SCENE_DEBUG', '1') == '1':
+    scene_console = logging.StreamHandler()
+    scene_console.addFilter(lambda record: record.getMessage().startswith(('SCENE_', 'TEMPORAL_DEEP_')))
+    scene_console.setFormatter(logging.Formatter('%(asctime)s %(message)s'))
+    track_logger.addHandler(scene_console)
+
 
 def log_track_event(event, **fields):
     track_logger.info("%s %s", event, json.dumps(fields, ensure_ascii=True))
@@ -98,6 +106,7 @@ object_tracker = ObjectTracker(
 )
 prediction_feedback = PredictionFeedback()
 prediction_evaluations = PredictionEvaluationMemory(event_logger=log_track_event)
+deep_analysis_state = DeepAnalysisState(logger=log_track_event)
 
 
 # ---------------------------------------------------------
@@ -472,6 +481,7 @@ def update_stable_reasoning(
 # ---------------------------------------------------------
 
 def reset_motion_smoothing():
+    deep_analysis_state.invalidate()
 
     global motion_history
     global latest_stable_motion_evidence
@@ -994,11 +1004,13 @@ def analyze_existing_yolo_result(
     source_type="camera",
     motion_evidence=None,
     snapshot=None,
+    analysis_job=None,
 ):
 
     global latest_reasoning
 
     temp_path = None
+    started = deep_analysis_state.clock()
 
     try:
 
@@ -1011,7 +1023,10 @@ def analyze_existing_yolo_result(
         yolo_state = snapshot.world_state()
         stable_motion_evidence = snapshot.motion_evidence()
         vlm_frame = snapshot.frame().copy()
+        load_started = deep_analysis_state.clock()
         load_smolvlm()
+        deep_analysis_state.trace('SCENE_MODEL_LOADED', analysis_job,
+            model_load_duration_seconds=deep_analysis_state.clock()-load_started)
 
         height, width = (
             vlm_frame.shape[:2]
@@ -1087,12 +1102,22 @@ def analyze_existing_yolo_result(
         )
 
         with smolvlm_lock:
-
+            inference_started = deep_analysis_state.clock()
             smolvlm_state = (
                 smolvlm_model.perceive(
                     temp_path
                 )
             )
+        deep_analysis_state.trace('SCENE_INFERENCE_COMPLETED', analysis_job,
+            inference_duration_seconds=deep_analysis_state.clock()-inference_started,
+            description_produced=bool(smolvlm_state.data.get('scene_description')))
+
+        # Scene evidence has its own age policy, independent of temporal timeout.
+        scene_text = smolvlm_state.data.get('scene_description', '').strip()
+        if analysis_job is not None:
+            deep_analysis_state.apply_scene(analysis_job, scene_text)
+        elif scene_text:
+            update_stable_description(scene_text)
 
         fused_state = (
             perception_fusion.fuse(
@@ -1173,11 +1198,6 @@ def analyze_existing_yolo_result(
             .strip()
         )
 
-        if description:
-
-            update_stable_description(
-                description
-            )
 
         # -------------------------------------------------
         # Temporal reasoning
@@ -1195,9 +1215,6 @@ def analyze_existing_yolo_result(
             )
         )
 
-        deep_issued = prediction_evaluations.record_state(fused_state,
-            {**temporal.get("expected", {}), **temporal.get("future", {})}, "temporal_deep")
-        fused_state.data['evaluation_predictions'] = deep_issued
 
         temporal_future = (
             temporal.get(
@@ -1362,23 +1379,39 @@ def analyze_existing_yolo_result(
                 "source": "insufficient_evidence",
             }
 
-        if candidate_reasoning.get('source') == 'temporal_deep' and deep_issued:
-            candidate_reasoning.update({key: deep_issued[-1][key] for key in (
-                'raw_confidence', 'calibration_reliability', 'calibrated_confidence', 'calibration_samples')})
+        def publish():
+            deep_issued = prediction_evaluations.record_state(fused_state,
+                {**temporal.get('expected', {}), **temporal.get('future', {})}, 'temporal_deep')
+            fused_state.data['evaluation_predictions'] = deep_issued
+            if candidate_reasoning.get('source') == 'temporal_deep' and deep_issued:
+                candidate_reasoning.update({key: deep_issued[-1][key] for key in (
+                    'raw_confidence', 'calibration_reliability', 'calibrated_confidence',
+                    'calibration_samples', 'track_id', 'prediction_id')})
+            if analysis_job is None or candidate_reasoning.get('source') != 'temporal_deep':
+                update_stable_reasoning(candidate_reasoning)
+            return candidate_reasoning
 
-        update_stable_reasoning(
-            candidate_reasoning
-        )
+        if analysis_job is not None:
+            analysis_job['track_id'] = temporal.get('expected', {}).get('track_id')
+            deep_analysis_state.complete(analysis_job, publish)
+        else:
+            publish()
 
     except Exception as exc:
-
+        import traceback
+        detail = traceback.format_exc()
+        deep_analysis_state.trace('SCENE_ANALYSIS_ERROR', analysis_job,
+            error=str(exc), traceback=detail)
+        print('SCENE_ANALYSIS_ERROR\n' + detail)
         print(
             "AISTHESIS analysis error:",
             exc,
         )
 
     finally:
-
+        deep_analysis_state.trace('SCENE_ANALYSIS_COMPLETED', analysis_job,
+            analysis_completed_timestamp=deep_analysis_state.wall_clock(),
+            total_duration_seconds=deep_analysis_state.clock()-started)
         if (
             temp_path
             and os.path.exists(
@@ -1419,6 +1452,9 @@ def analyze_background(
         build_yolo_world_state(frame, yolo_result, source_type),
         motion_evidence or [],
     )
+    job = deep_analysis_state.begin(snapshot)
+    if job is None:
+        return
     analysis_running = True
 
     def worker():
@@ -1432,16 +1468,23 @@ def analyze_background(
                 None,
                 source_type,
                 snapshot=snapshot,
+                analysis_job=job,
             )
 
         finally:
-
+            deep_analysis_state.finish(job)
             analysis_running = False
 
-    threading.Thread(
+    deep_analysis_state.worker = threading.Thread(
         target=worker,
         daemon=True,
-    ).start()
+    )
+    try:
+        deep_analysis_state.worker.start()
+    except Exception:
+        deep_analysis_state.finish(job)
+        analysis_running = False
+        raise
 
 
 
@@ -1456,6 +1499,15 @@ def get_display_reasoning():
     current = dict(
         latest_reasoning
     )
+    deep = deep_analysis_state.current()
+    # Fresh live motion has priority; deep is a bounded fallback only.
+    if current.get('source') != 'temporal_live' and deep is not None:
+        current = deep
+    if current.get('source') == 'temporal_deep' and deep is None:
+        current = dict(prediction='indeterminate', source='deep_expired', uncertainty=1.0)
+    if display_reasoning.get('source') == 'temporal_deep':
+        display_reasoning = current
+        display_reasoning_last_valid_at = 0.0
 
     prediction = current.get(
         "prediction",
@@ -1496,7 +1548,7 @@ def draw_overlay(
 ):
 
     description = (
-        latest_description
+        deep_analysis_state.scene_description() or latest_description
     )
 
     ui_reasoning = (
@@ -1882,6 +1934,7 @@ def run_live_camera():
                 break
     finally:
         inference.close()
+        deep_analysis_state.shutdown()
         cap.release()
         cv2.destroyAllWindows()
 
@@ -2162,6 +2215,7 @@ def open_video():
         if key == ord("q"):
             break
 
+    deep_analysis_state.shutdown()
     cap.release()
 
     cv2.destroyAllWindows()

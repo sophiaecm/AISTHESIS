@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 import json
+from time import monotonic, time
 
 from fifth_layer.world_state import WorldState
 
@@ -14,13 +15,16 @@ class AnalysisSnapshot:
     dtype: str
     state_json: str
     motion_json: str
+    snapshot_monotonic: float | None = None
 
     @classmethod
     def capture(cls, frame, world_state, stable_motion):
         # Serialized payloads share no mutable nested values with the producer.
         return cls(world_state.timestamp, frame.tobytes(), tuple(frame.shape),
                    frame.dtype.str, json.dumps(world_state.data),
-                   json.dumps(stable_motion))
+                   json.dumps(stable_motion),
+                   monotonic() - max(0, time()-world_state.timestamp)
+                   if world_state.timestamp is not None else monotonic())
 
     def frame(self):
         import numpy as np

@@ -22,8 +22,10 @@ def live_functions(*names):
                  if isinstance(node, ast.FunctionDef) and node.name in names]
     from fifth_layer.prediction_evaluation import PredictionEvaluationMemory, evaluation_overlay
     from fifth_layer.confidence_calibration import calibration_overlay
+    from fifth_layer.perception.deep_analysis import DeepAnalysisState
     import time
     env = {"AnalysisSnapshot": AnalysisSnapshot,
+           "deep_analysis_state": DeepAnalysisState(),
            "prediction_evaluations": PredictionEvaluationMemory(),
            "evaluation_overlay": evaluation_overlay, "calibration_overlay": calibration_overlay, "time": time}
     exec(compile(tree, "live_app.py", "exec"), env)
