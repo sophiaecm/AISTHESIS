@@ -16,6 +16,7 @@ from ultralytics import YOLO
 from fifth_layer.perception.live_inference import LiveInferenceWorker
 from fifth_layer.world_state import WorldState
 from fifth_layer.perception.analysis_snapshot import AnalysisSnapshot
+from fifth_layer.perception.structured_scene_narrator import FastSceneState, NarrationEventLogger
 from fifth_layer.perception.deep_analysis import DeepAnalysisState
 from fifth_layer.perception.tracking import ObjectTracker
 from fifth_layer.prediction_feedback import PredictionFeedback
@@ -107,6 +108,13 @@ object_tracker = ObjectTracker(
 prediction_feedback = PredictionFeedback()
 prediction_evaluations = PredictionEvaluationMemory(event_logger=log_track_event)
 deep_analysis_state = DeepAnalysisState(logger=log_track_event)
+fast_scene_state = FastSceneState(logger=NarrationEventLogger(log_track_event))
+fast_scene_description = ''
+deep_scene_description = ''
+fast_scene_timestamp = deep_scene_timestamp = None
+fast_scene_latency_ms = 0.0
+fast_scene_detail_level = 'detailed'
+fast_scene_mode = 'access'
 
 
 # ---------------------------------------------------------
@@ -481,6 +489,7 @@ def update_stable_reasoning(
 # ---------------------------------------------------------
 
 def reset_motion_smoothing():
+    fast_scene_state.reset()
     deep_analysis_state.invalidate()
 
     global motion_history
@@ -750,6 +759,28 @@ def track_observation(current_state):
     visible = filter_live_tracking_detections(visible)
     data["prediction_feedback"] = data["prediction_evaluations"]
     return visible
+
+
+def update_fast_scene(state, completed_observation=False, track_memory=None):
+    global fast_scene_description, fast_scene_timestamp, fast_scene_latency_ms
+    global fast_scene_detail_level, fast_scene_mode
+    data = dict(state.data)
+    if track_memory is not None:
+        data['fast_scene_track_memory'] = list(track_memory.tracks.values())
+    data['stable_motion_evidence'] = list(latest_stable_motion_evidence)
+    # Read current live reasoning, never a cached deep prediction from an old frame.
+    data['narration_reasoning'] = dict(latest_reasoning) if latest_reasoning.get('source') == 'temporal_live' else {}
+    result = fast_scene_state.update(WorldState(state.timestamp, data),
+                                     completed_observation=completed_observation)
+    if result:
+        fast_scene_description = fast_scene_state.description()
+        fast_scene_timestamp = result['generated_timestamp']
+        fast_scene_latency_ms = result['latency_ms']
+        fast_scene_detail_level, fast_scene_mode = result['detail_level'], result['mode']
+        state.data.update(fast_scene_description=fast_scene_description,
+            fast_scene_source=result['source'], fast_scene_timestamp=fast_scene_timestamp,
+            fast_scene_latency_ms=fast_scene_latency_ms, fast_scene_detail_level=fast_scene_detail_level,
+            fast_scene_mode=fast_scene_mode, fast_scene_narration=result)
 
 
 def calculate_temporal_motion(
@@ -1546,10 +1577,14 @@ def draw_overlay(
     detections=None,
     predicted_tracks=None,
 ):
-
+    global fast_scene_description, deep_scene_description, deep_scene_timestamp
     description = (
         deep_analysis_state.scene_description() or latest_description
     )
+    deep_scene_description = description
+    with deep_analysis_state.lock:
+        deep_scene_timestamp = deep_analysis_state.scene[1]['snapshot_timestamp'] if deep_analysis_state.scene else None
+    fast_scene_description = fast_scene_state.description()
 
     ui_reasoning = (
         get_display_reasoning()
@@ -1633,7 +1668,13 @@ def draw_overlay(
             current_line
         )
 
-    lines = lines[:4]
+    import textwrap
+    fast_lines = textwrap.wrap(fast_scene_description, max_chars)
+    preview = fast_lines[:5]
+    if len(fast_lines) > 5:
+        preview[-1] = preview[-1].rstrip('.') + '...'
+    lines = (preview
+             + ['DEEP VISUAL DESCRIPTION'] + lines[:3])
 
     panel_height = (
         254
@@ -1689,7 +1730,7 @@ def draw_overlay(
 
     cv2.putText(
         frame,
-        "SCENE",
+        "FAST STRUCTURED SCENE",
         (20, y),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.55,
@@ -1707,13 +1748,13 @@ def draw_overlay(
             line,
             (20, y),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.48,
+            0.40,
             (255, 255, 255),
             1,
             cv2.LINE_AA,
         )
 
-        y += 23
+        y += 16
 
     y += 5
 
@@ -1909,6 +1950,7 @@ def run_live_camera():
                     previous_detections = current_detections
                     previous_detection_time = observed_at
                     update_live_temporal_prediction(current_state)
+                    update_fast_scene(current_state, completed_observation=True, track_memory=object_tracker)
                     now = time.time()
                     if (not analysis_running
                             and now - camera_started_at >= CAMERA_WARMUP_SECONDS
@@ -2165,6 +2207,7 @@ def open_video():
         )
 
         update_live_temporal_prediction(current_state)
+        update_fast_scene(current_state, completed_observation=True, track_memory=object_tracker)
 
         previous_detections = (
             current_detections

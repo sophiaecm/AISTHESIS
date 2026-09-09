@@ -18,6 +18,9 @@ class WorldState:
             Forecast records optionally preserve raw_confidence,
             calibration_reliability and calibrated_confidence at issuance.
             These fields are prediction metadata, never detector confidence.
+            Optional fast_scene_narration contains a structured local description;
+            fast_scene_description/source/timestamp/latency_ms/detail_level/mode
+            are display metadata independent of deep scene state.
     """
 
     timestamp: Optional[float] = None

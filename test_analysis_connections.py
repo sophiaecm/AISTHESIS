@@ -17,14 +17,17 @@ from fifth_layer.world_state import WorldState
 
 
 def live_functions(*names):
+    names = (*names, 'update_fast_scene')
     tree = ast.parse(Path("live_app.py").read_text())
     tree.body = [node for node in tree.body
                  if isinstance(node, ast.FunctionDef) and node.name in names]
     from fifth_layer.prediction_evaluation import PredictionEvaluationMemory, evaluation_overlay
     from fifth_layer.confidence_calibration import calibration_overlay
     from fifth_layer.perception.deep_analysis import DeepAnalysisState
+    from fifth_layer.perception.structured_scene_narrator import FastSceneState
     import time
     env = {"AnalysisSnapshot": AnalysisSnapshot,
+           "fast_scene_state": FastSceneState(), "WorldState": WorldState,
            "deep_analysis_state": DeepAnalysisState(),
            "prediction_evaluations": PredictionEvaluationMemory(),
            "evaluation_overlay": evaluation_overlay, "calibration_overlay": calibration_overlay, "time": time}

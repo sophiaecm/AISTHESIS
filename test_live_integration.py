@@ -149,6 +149,7 @@ class LiveIntegrationTests(unittest.TestCase):
                    reset_motion_smoothing=Mock(), LiveInferenceWorker=Mock(return_value=worker),
                    infer_yolo=Mock(), build_yolo_world_state=Mock(return_value=state),
                    track_observation=track, calculate_temporal_motion=Mock(),
+                   object_tracker=Mock(tracks={}),
                    update_live_temporal_prediction=Mock(), analysis_running=True,
                    LIVE_YOLO_EVERY_N_FRAMES=2, LIVE_YOLO_EVERY_N_FRAMES_DURING_VLM=4,
                    draw_overlay=overlay)
