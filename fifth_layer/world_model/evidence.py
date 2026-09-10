@@ -1,0 +1,95 @@
+"""Immutable, source-labelled evidence for opt-in world-model reasoning."""
+from dataclasses import dataclass, field
+from enum import Enum
+from hashlib import sha256
+import json
+from collections.abc import Mapping
+
+from ._structured import freeze_fields, identifier, number, timestamps
+
+
+def stable_id(prefix, *parts):
+    """Canonical structured content identity; no wall clock or random UUID."""
+    def plain(value):
+        if isinstance(value, Mapping):
+            return {key: plain(child) for key, child in value.items()}
+        if isinstance(value, (tuple, list)):
+            return [plain(child) for child in value]
+        if isinstance(value, (set, frozenset)):
+            return sorted((plain(child) for child in value), key=lambda x: json.dumps(x, sort_keys=True))
+        return value
+    payload = json.dumps(plain(parts), sort_keys=True, separators=(',', ':'), allow_nan=False)
+    return prefix + ':' + sha256(payload.encode('utf-8')).hexdigest()
+
+
+class EvidenceSource(str, Enum):
+    PHYSICS = 'physics'
+    TEMPORAL = 'temporal'
+    OCCLUSION = 'occlusion'
+    SEMANTIC = 'semantic'
+    MOTION = 'motion'
+    TRACKING = 'tracking'
+
+
+@dataclass(frozen=True)
+class EvidenceItem:
+    evidence_id: str
+    scene_id: str
+    source_type: EvidenceSource
+    source_component: str
+    evidence_type: str
+    value: Mapping
+    timestamp: float | None
+    confidence: float | None = None
+    supports: tuple[str, ...] = ()
+    contradicts: tuple[str, ...] = ()
+    track_id: int | str | None = None
+    object_id: int | str | None = None
+    provenance: Mapping = field(default_factory=dict)
+
+    def __post_init__(self):
+        for name in ('evidence_id', 'scene_id', 'source_component', 'evidence_type'):
+            identifier(getattr(self, name), name)
+        try:
+            object.__setattr__(self, 'source_type', EvidenceSource(self.source_type))
+        except (ValueError, TypeError) as exc:
+            raise ValueError('source_type must be physics, temporal, occlusion, semantic, motion or tracking') from exc
+        for name in ('track_id', 'object_id'):
+            value = getattr(self, name)
+            if value is not None and type(value) not in (str, int):
+                raise ValueError(f'{name} must be an integer, string or None')
+        timestamps(self, ('timestamp',), optional=('timestamp',))
+        if self.confidence is not None:
+            number(self.confidence, 'confidence', unit=True)
+        freeze_fields(self, ('value', 'supports', 'contradicts', 'provenance'))
+        if not isinstance(self.value, Mapping):
+            raise ValueError('value must be a structured mapping')
+        for name in ('supports', 'contradicts'):
+            values = getattr(self, name)
+            if not isinstance(values, tuple):
+                raise ValueError(f'{name} must be an ordered sequence')
+            for value in values:
+                identifier(value, name)
+
+
+@dataclass(frozen=True)
+class EvidenceBundle:
+    scene_id: str
+    items: tuple[EvidenceItem, ...] = ()
+    provenance: Mapping = field(default_factory=dict)
+
+    def __post_init__(self):
+        identifier(self.scene_id, 'scene_id')
+        if not isinstance(self.items, (tuple, list)):
+            raise ValueError('items must be an ordered sequence of EvidenceItem')
+        seen = set()
+        for item in self.items:
+            if not isinstance(item, EvidenceItem):
+                raise ValueError('items must contain EvidenceItem instances')
+            if item.scene_id != self.scene_id:
+                raise ValueError('evidence scene_id must match bundle scene_id')
+            if item.evidence_id in seen:
+                raise ValueError(f'duplicate evidence_id: {item.evidence_id}')
+            seen.add(item.evidence_id)
+        object.__setattr__(self, 'items', tuple(sorted(self.items, key=lambda x: x.evidence_id)))
+        freeze_fields(self, ('provenance',))
