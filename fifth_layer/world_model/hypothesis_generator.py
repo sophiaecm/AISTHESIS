@@ -3,6 +3,7 @@ from collections import defaultdict
 
 from ._structured import number
 from .evidence import stable_id
+from .sensory_evidence import sensory_applies
 from .hypothesis import Hypothesis, HypothesisSet
 from .trajectory import FutureTrajectory, validate_trajectories
 
@@ -45,7 +46,12 @@ class MultiHypothesisGenerator:
         number(created, 'created_timestamp', nonnegative=True)
         number(horizon_seconds, 'horizon_seconds', nonnegative=True)
         groups = defaultdict(list)
+        sensory = defaultdict(list)
         for item in evidence.items:
+            if item.source_type == 'sensory':
+                if item.epistemic_status != 'unavailable' and (item.track_id is not None or item.object_id is not None):
+                    sensory[_association(item)].append(item)
+                continue
             groups[_association(item)].append(item)
         if not groups:
             groups[('scene', scene.scene_id)] = []
@@ -76,9 +82,16 @@ class MultiHypothesisGenerator:
             for kind in sorted(candidates):
                 supporting, rule, raw, assumptions = candidates[kind]
                 opposing = [item for item in items if kind in item.contradicts]
+                additional = [item for item in sensory[association]
+                              if sensory_applies(item, kind, items)]
+                sensory_opposing = [item for item in sensory[association]
+                                    if sensory_applies(item, kind, items, opposing=True)]
+                opposing = sorted(opposing + sensory_opposing, key=lambda item: item.evidence_id)
                 score = raw * (.5 if opposing else 1.)
                 supporting = sorted(supporting, key=lambda item: item.evidence_id)
                 confidence_source = next((item for item in supporting if item.confidence is not None), None)
+                # Correlated inferred consequences never raise base confidence or score.
+                supporting = sorted(supporting + additional, key=lambda item: item.evidence_id)
                 identity = stable_id('h', scene.scene_id, association, kind, created, horizon_seconds)
                 hypotheses.append(Hypothesis(
                     hypothesis_id=identity, scene_id=scene.scene_id, hypothesis_type=kind,
@@ -98,7 +111,15 @@ class MultiHypothesisGenerator:
                         confidence_evidence_id=confidence_source.evidence_id if confidence_source else None,
                         score_inputs=tuple(dict(evidence_id=item.evidence_id, confidence=item.confidence,
                                                 supports=item.supports, contradicts=item.contradicts,
-                                                value=item.value) for item in items),
+                                                value=item.value, **(dict(
+                                                    epistemic_status=item.epistemic_status,
+                                                    modality=item.modality,
+                                                    supporting_evidence_ids=item.supporting_evidence_ids,
+                                                    opposing_evidence_ids=item.opposing_evidence_ids,
+                                                    provenance=item.provenance)
+                                                    if item.source_type == 'sensory' else {}))
+                                           for item in sorted(items + additional + sensory_opposing,
+                                                              key=lambda item: item.evidence_id)),
                         scene_uncertainty=scene.uncertainty)))
         return HypothesisSet(scene.scene_id, tuple(hypotheses), created)
 

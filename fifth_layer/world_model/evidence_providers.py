@@ -177,7 +177,7 @@ class TrackingEvidenceProvider:
 
 
 def collect_evidence(scene, *, physics=None, temporal=None, occlusion=None, semantic=None,
-                     source_timestamps=None):
+                     source_timestamps=None, auditory=None, include_sensory=False):
     """Read scene summaries plus explicitly supplied outputs, never compute outputs.
 
     source_timestamps supplies observation timestamps for outputs that carry none.
@@ -193,6 +193,10 @@ def collect_evidence(scene, *, physics=None, temporal=None, occlusion=None, sema
         items.extend(provider.provide(scene, output, timestamp=source_timestamps.get(name)))
     items.extend(MotionEvidenceProvider().provide(scene))
     items.extend(TrackingEvidenceProvider().provide(scene))
+    if include_sensory or auditory is not None:
+        from .sensory_evidence import collect_sensory_evidence
+        items.extend(collect_sensory_evidence(scene, auditory=auditory,
+                     timestamp=source_timestamps.get('auditory')))
     unique = {item.evidence_id: item for item in items}
     return EvidenceBundle(scene.scene_id, tuple(unique.values()),
                           {'provider_version': '0.2', 'missing_evidence_is_contradiction': False})

@@ -29,6 +29,7 @@ class EvidenceSource(str, Enum):
     SEMANTIC = 'semantic'
     MOTION = 'motion'
     TRACKING = 'tracking'
+    SENSORY = 'sensory'
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,10 @@ class EvidenceItem:
     track_id: int | str | None = None
     object_id: int | str | None = None
     provenance: Mapping = field(default_factory=dict)
+    modality: str | None = None
+    epistemic_status: str | None = None
+    supporting_evidence_ids: tuple[str, ...] = ()
+    opposing_evidence_ids: tuple[str, ...] = ()
 
     def __post_init__(self):
         for name in ('evidence_id', 'scene_id', 'source_component', 'evidence_type'):
@@ -53,7 +58,26 @@ class EvidenceItem:
         try:
             object.__setattr__(self, 'source_type', EvidenceSource(self.source_type))
         except (ValueError, TypeError) as exc:
-            raise ValueError('source_type must be physics, temporal, occlusion, semantic, motion or tracking') from exc
+            raise ValueError('unsupported evidence source_type') from exc
+        if not isinstance(self.value, Mapping):
+            raise ValueError('value must be a structured mapping')
+        if self.source_type == EvidenceSource.SENSORY:
+            if self.modality not in ('auditory', 'tactile', 'thermal', 'kinesthetic'):
+                raise ValueError('sensory evidence requires an explicit supported modality')
+            if self.epistemic_status not in ('observed', 'inferred', 'expected', 'unavailable'):
+                raise ValueError('sensory evidence requires an explicit epistemic_status')
+            if self.epistemic_status == 'unavailable' and (
+                    self.supports or self.contradicts or self.confidence is not None
+                    or self.supporting_evidence_ids or self.opposing_evidence_ids):
+                raise ValueError('unavailable evidence cannot support or oppose claims')
+            if self.epistemic_status == 'unavailable' and dict(self.value) != {'observation_available': False}:
+                raise ValueError('unavailable evidence describes availability only')
+            observed = self.value.get('observed')
+            if observed is not None and (type(observed) is not bool or
+                    observed != (self.epistemic_status == 'observed')):
+                raise ValueError('observed flag conflicts with epistemic_status')
+        elif self.modality is not None or self.epistemic_status is not None:
+            raise ValueError('modality and epistemic_status require sensory source_type')
         for name in ('track_id', 'object_id'):
             value = getattr(self, name)
             if value is not None and type(value) not in (str, int):
@@ -61,10 +85,11 @@ class EvidenceItem:
         timestamps(self, ('timestamp',), optional=('timestamp',))
         if self.confidence is not None:
             number(self.confidence, 'confidence', unit=True)
-        freeze_fields(self, ('value', 'supports', 'contradicts', 'provenance'))
+        freeze_fields(self, ('value', 'supports', 'contradicts', 'provenance',
+                             'supporting_evidence_ids', 'opposing_evidence_ids'))
         if not isinstance(self.value, Mapping):
             raise ValueError('value must be a structured mapping')
-        for name in ('supports', 'contradicts'):
+        for name in ('supports', 'contradicts', 'supporting_evidence_ids', 'opposing_evidence_ids'):
             values = getattr(self, name)
             if not isinstance(values, tuple):
                 raise ValueError(f'{name} must be an ordered sequence')

@@ -9,6 +9,7 @@ from .evidence_providers import (PhysicsEvidenceProvider, TemporalEvidenceProvid
     OcclusionEvidenceProvider, SemanticEvidenceProvider, MotionEvidenceProvider,
     TrackingEvidenceProvider, collect_evidence)
 from .hypothesis_generator import MultiHypothesisGenerator, adapt_temporal_trajectories
+from .sensory_evidence import AuditoryEvidenceProvider, collect_sensory_evidence, unavailable_modality
 
 __all__ = ['SceneState', 'Hypothesis', 'HypothesisSet', 'HypothesisStatus',
            'FutureTrajectory', 'validate_trajectories', 'ExperienceEpisode',
@@ -16,4 +17,5 @@ __all__ = ['SceneState', 'Hypothesis', 'HypothesisSet', 'HypothesisStatus',
            'EvidenceItem', 'EvidenceBundle', 'EvidenceSource', 'PhysicsEvidenceProvider',
            'TemporalEvidenceProvider', 'OcclusionEvidenceProvider', 'SemanticEvidenceProvider',
            'MotionEvidenceProvider', 'TrackingEvidenceProvider', 'collect_evidence',
-           'MultiHypothesisGenerator', 'adapt_temporal_trajectories']
+           'MultiHypothesisGenerator', 'adapt_temporal_trajectories',
+           'AuditoryEvidenceProvider', 'collect_sensory_evidence', 'unavailable_modality']
