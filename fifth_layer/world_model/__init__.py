@@ -10,6 +10,9 @@ from .evidence_providers import (PhysicsEvidenceProvider, TemporalEvidenceProvid
     TrackingEvidenceProvider, collect_evidence)
 from .hypothesis_generator import MultiHypothesisGenerator, adapt_temporal_trajectories
 from .sensory_evidence import AuditoryEvidenceProvider, collect_sensory_evidence, unavailable_modality
+from .prediction_records import PredictionRecord, OutcomeRecord, PredictionEvaluation
+from .prediction_observation import (prediction_from_hypothesis, outcome_from_scene,
+                                     evaluate_prediction, experience_episode)
 
 __all__ = ['SceneState', 'Hypothesis', 'HypothesisSet', 'HypothesisStatus',
            'FutureTrajectory', 'validate_trajectories', 'ExperienceEpisode',
@@ -18,4 +21,6 @@ __all__ = ['SceneState', 'Hypothesis', 'HypothesisSet', 'HypothesisStatus',
            'TemporalEvidenceProvider', 'OcclusionEvidenceProvider', 'SemanticEvidenceProvider',
            'MotionEvidenceProvider', 'TrackingEvidenceProvider', 'collect_evidence',
            'MultiHypothesisGenerator', 'adapt_temporal_trajectories',
-           'AuditoryEvidenceProvider', 'collect_sensory_evidence', 'unavailable_modality']
+           'AuditoryEvidenceProvider', 'collect_sensory_evidence', 'unavailable_modality',
+           'PredictionRecord', 'OutcomeRecord', 'PredictionEvaluation',
+           'prediction_from_hypothesis', 'outcome_from_scene', 'evaluate_prediction', 'experience_episode']

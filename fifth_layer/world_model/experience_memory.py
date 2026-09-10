@@ -16,6 +16,8 @@ class EvaluationStatus(str, Enum):
     PARTIALLY_SUPPORTED = 'partially_supported'
     UNEVALUABLE = 'unevaluable'
     EXPIRED = 'expired'
+    UNOBSERVABLE = 'unobservable'
+    INSUFFICIENT_EVIDENCE = 'insufficient_evidence'
 
 
 @dataclass(frozen=True)
@@ -56,7 +58,7 @@ class ExperienceEpisode:
             object.__setattr__(self, 'evaluation_status', EvaluationStatus(self.evaluation_status))
         except (ValueError, TypeError) as exc:
             raise ValueError('evaluation_status must be pending, supported, contradicted, '
-                             'partially_supported, unevaluable or expired') from exc
+                             'partially_supported, unevaluable, expired, unobservable or insufficient_evidence') from exc
         freeze_fields(self, ('hypothesis_snapshot', 'prediction_summary', 'observation_summary',
                             'prediction_error', 'provenance'))
         for name in ('hypothesis_snapshot', 'prediction_summary', 'observation_summary', 'provenance'):
