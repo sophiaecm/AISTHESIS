@@ -48,6 +48,9 @@ class MultiHypothesisGenerator:
         groups = defaultdict(list)
         sensory = defaultdict(list)
         for item in evidence.items:
+            if item.source_type == 'experience':
+                # Historical context cannot generate candidates or change base scores.
+                continue
             if item.source_type == 'sensory':
                 if item.epistemic_status != 'unavailable' and (item.track_id is not None or item.object_id is not None):
                     sensory[_association(item)].append(item)

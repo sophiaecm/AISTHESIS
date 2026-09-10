@@ -6,7 +6,7 @@ from threading import RLock
 import time
 from typing import Any, Mapping
 
-from ._structured import freeze_fields, identifier, timestamps
+from ._structured import freeze_fields, identifier, number, timestamps
 
 
 class EvaluationStatus(str, Enum):
@@ -132,6 +132,18 @@ class ExperienceMemory:
         with self._lock:
             self._cleanup(self._clock())
             return tuple(item[1] for item in reversed(self._episodes.values()))[:limit]
+
+    def snapshot(self, *, at_time):
+        """Read retained, nonexpired episodes without clock calls or mutations.
+
+        at_time must use the same clock domain as admission. For deterministic
+        replay, construct this memory with an explicitly controlled replay clock.
+        Unlike recent(), this read does not remove expired storage entries.
+        """
+        number(at_time, 'at_time', nonnegative=True)
+        with self._lock:
+            return tuple(episode for added, episode in self._episodes.values()
+                         if 0 <= at_time - added < self.TTL_SECONDS)
 
     def cleanup(self):
         with self._lock:

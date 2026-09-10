@@ -30,6 +30,7 @@ class EvidenceSource(str, Enum):
     MOTION = 'motion'
     TRACKING = 'tracking'
     SENSORY = 'sensory'
+    EXPERIENCE = 'experience'
 
 
 @dataclass(frozen=True)
