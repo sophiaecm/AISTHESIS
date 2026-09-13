@@ -1,0 +1,2 @@
+# Optional local PDF ingestion only; not imported by production pipelines.
+PyMuPDF==1.28.2
