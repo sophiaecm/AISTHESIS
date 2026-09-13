@@ -1,4 +1,4 @@
-import os
+﻿import os
 import json
 import logging
 from logging.handlers import RotatingFileHandler
@@ -6,7 +6,7 @@ import tempfile
 import threading
 import time
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 
 from collections import Counter, deque
 
@@ -27,6 +27,7 @@ from fifth_layer.perception.perception_fusion import PerceptionFusion
 from fifth_layer.perception.temporal import extract_motion_evidence
 from fifth_layer.reasoners.orchestrator import AisthesisOrchestrator
 from fifth_layer.reasoners.temporal_prediction import TemporalPredictionReasoner
+from fifth_layer.scientific_input_adapter import ScientificInputAdapter
 
 
 # ---------------------------------------------------------
@@ -2265,6 +2266,325 @@ def open_video():
 
 
 # ---------------------------------------------------------
+# Paper / PDF
+# ---------------------------------------------------------
+
+def _add_minilab_section(parent, title, values):
+    """Render one read-only Mini-Lab summary section."""
+
+    heading = tk.Label(
+        parent,
+        text=title,
+        font=(
+            "Arial",
+            11,
+            "bold",
+        ),
+        anchor="w",
+        justify="left",
+    )
+
+    heading.pack(
+        fill="x",
+        padx=16,
+        pady=(
+            12,
+            4,
+        ),
+    )
+
+    if values:
+        text = "\n\n".join(
+            f"- {value}"
+            for value in values
+        )
+    else:
+        text = "Not detected"
+
+    body = tk.Label(
+        parent,
+        text=text,
+        font=(
+            "Arial",
+            10,
+        ),
+        anchor="w",
+        justify="left",
+        wraplength=760,
+    )
+
+    body.pack(
+        fill="x",
+        padx=24,
+        pady=(
+            0,
+            6,
+        ),
+    )
+
+
+def show_minilab_result(
+    result,
+    source_path,
+):
+    """Display a UI-safe view of the existing Mini-Lab result."""
+
+    window = tk.Toplevel()
+
+    window.title(
+        "AISTHESIS Mini-Lab - "
+        + os.path.basename(
+            source_path
+        )
+    )
+
+    window.geometry(
+        "860x720"
+    )
+
+    container = tk.Frame(
+        window
+    )
+
+    container.pack(
+        fill="both",
+        expand=True,
+    )
+
+    canvas = tk.Canvas(
+        container,
+        highlightthickness=0,
+    )
+
+    scrollbar = tk.Scrollbar(
+        container,
+        orient="vertical",
+        command=canvas.yview,
+    )
+
+    content_frame = tk.Frame(
+        canvas
+    )
+
+    content_frame.bind(
+        "<Configure>",
+        lambda event: canvas.configure(
+            scrollregion=(
+                canvas.bbox(
+                    "all"
+                )
+            )
+        ),
+    )
+
+    frame_window = canvas.create_window(
+        (
+            0,
+            0,
+        ),
+        window=content_frame,
+        anchor="nw",
+    )
+
+    def resize_content(event):
+        canvas.itemconfigure(
+            frame_window,
+            width=event.width,
+        )
+
+    canvas.bind(
+        "<Configure>",
+        resize_content,
+    )
+
+    canvas.configure(
+        yscrollcommand=scrollbar.set
+    )
+
+    canvas.pack(
+        side="left",
+        fill="both",
+        expand=True,
+    )
+
+    scrollbar.pack(
+        side="right",
+        fill="y",
+    )
+
+    title_label = tk.Label(
+        content_frame,
+        text="AISTHESIS Mini-Lab",
+        font=(
+            "Arial",
+            18,
+            "bold",
+        ),
+        anchor="w",
+    )
+
+    title_label.pack(
+        fill="x",
+        padx=16,
+        pady=(
+            16,
+            6,
+        ),
+    )
+
+    notice = tk.Label(
+        content_frame,
+        text=(
+            "Mini-Lab extracts candidate scientific structure and "
+            "relationships. Displayed content is not independently "
+            "verified scientific fact."
+        ),
+        font=(
+            "Arial",
+            10,
+            "italic",
+        ),
+        anchor="w",
+        justify="left",
+        wraplength=780,
+    )
+
+    notice.pack(
+        fill="x",
+        padx=16,
+        pady=(
+            0,
+            10,
+        ),
+    )
+
+    identity = tk.Label(
+        content_frame,
+        text=(
+            f"Document ID: {result.document_id}\n"
+            f"Structures: {result.summary.structure_count}    "
+            f"Relationships: {result.summary.relationship_count}"
+        ),
+        font=(
+            "Arial",
+            9,
+        ),
+        anchor="w",
+        justify="left",
+    )
+
+    identity.pack(
+        fill="x",
+        padx=16,
+        pady=(
+            0,
+            8,
+        ),
+    )
+
+    summary = result.summary
+
+    _add_minilab_section(
+        content_frame,
+        "Research Questions",
+        summary.research_questions,
+    )
+
+    _add_minilab_section(
+        content_frame,
+        "Hypotheses - Candidate / Not Verified",
+        summary.hypotheses,
+    )
+
+    _add_minilab_section(
+        content_frame,
+        "Methods",
+        summary.methods,
+    )
+
+    _add_minilab_section(
+        content_frame,
+        "Variables",
+        summary.variables,
+    )
+
+    _add_minilab_section(
+        content_frame,
+        "Datasets",
+        summary.datasets,
+    )
+
+    _add_minilab_section(
+        content_frame,
+        "Reported Results - Not Independently Verified",
+        summary.results,
+    )
+
+    _add_minilab_section(
+        content_frame,
+        "Author Claims - Not Established Facts",
+        summary.claims,
+    )
+
+    _add_minilab_section(
+        content_frame,
+        "Limitations",
+        summary.limitations,
+    )
+
+    _add_minilab_section(
+        content_frame,
+        "AISTHESIS-Inferred Relationships - Candidate / Not Verified",
+        summary.relationships,
+    )
+
+
+def open_paper():
+    """Open one scientific PDF through the existing Mini-Lab adapter."""
+
+    file_path = (
+        filedialog.askopenfilename(
+            title="Choose Scientific Paper / PDF",
+            filetypes=[
+                (
+                    "PDF files",
+                    "*.pdf",
+                )
+            ],
+        )
+    )
+
+    if not file_path:
+        return
+
+    try:
+        adapter = (
+            ScientificInputAdapter()
+        )
+
+        result = (
+            adapter.analyze_pdf(
+                file_path,
+                timestamp=time.time(),
+            )
+        )
+
+    except Exception as exc:
+        messagebox.showerror(
+            "AISTHESIS Mini-Lab",
+            (
+                "The selected PDF could not be analyzed.\n\n"
+                f"{exc}"
+            ),
+        )
+        return
+
+    show_minilab_result(
+        result,
+        file_path,
+    )
+
+# ---------------------------------------------------------
 # Main UI
 # ---------------------------------------------------------
 
@@ -2277,7 +2597,7 @@ def main():
     )
 
     root.geometry(
-        "420x360"
+        "420x440"
     )
 
     title_label = tk.Label(
@@ -2343,8 +2663,21 @@ def main():
         pady=10
     )
 
+    paper_button = tk.Button(
+        root,
+        text="Open Paper / PDF",
+        width=24,
+        height=2,
+        command=open_paper,
+    )
+
+    paper_button.pack(
+        pady=10
+    )
     root.mainloop()
 
 
 if __name__ == "__main__":
     main()
+
+
