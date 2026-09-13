@@ -5,7 +5,7 @@ from hashlib import sha256
 import json
 from collections.abc import Mapping
 
-from ._structured import freeze_fields, identifier, number, timestamps
+from ._structured import freeze, freeze_fields, identifier, number, timestamps
 
 
 def stable_id(prefix, *parts):
@@ -31,6 +31,23 @@ class EvidenceSource(str, Enum):
     TRACKING = 'tracking'
     SENSORY = 'sensory'
     EXPERIENCE = 'experience'
+    VISUAL = 'visual'
+    PHYSICAL = 'physical'
+    PHYSICS_CONSTRAINT = 'physics_constraint'
+    LEARNED_REPRESENTATION = 'learned_representation'
+    DOCUMENTARY = 'documentary'
+
+
+# Opt-in transport sources; existing provider validation is unchanged.
+INTEGRATION_STATUSES = {
+    EvidenceSource.VISUAL: ('observed', 'estimated', 'possible', 'unknown', 'unavailable'),
+    EvidenceSource.PHYSICAL: ('mixed', 'observed', 'estimated', 'possible', 'unknown', 'unavailable'),
+    EvidenceSource.PHYSICS_CONSTRAINT: ('assessment',),
+    EvidenceSource.LEARNED_REPRESENTATION: ('learned_signal',),
+    EvidenceSource.DOCUMENTARY: ('reported_result', 'author_claim', 'aisthesis_inference',
+        'unknown', 'limitation', 'method', 'measurement', 'dataset_reference',
+        'figure_evidence', 'table_evidence', 'equation_relation'),
+}
 
 
 @dataclass(frozen=True)
@@ -77,6 +94,9 @@ class EvidenceItem:
             if observed is not None and (type(observed) is not bool or
                     observed != (self.epistemic_status == 'observed')):
                 raise ValueError('observed flag conflicts with epistemic_status')
+        elif self.source_type in INTEGRATION_STATUSES:
+            if self.modality is not None or self.epistemic_status not in INTEGRATION_STATUSES[self.source_type]:
+                raise ValueError('integration source requires a compatible explicit epistemic_status')
         elif self.modality is not None or self.epistemic_status is not None:
             raise ValueError('modality and epistemic_status require sensory source_type')
         for name in ('track_id', 'object_id'):
@@ -86,8 +106,16 @@ class EvidenceItem:
         timestamps(self, ('timestamp',), optional=('timestamp',))
         if self.confidence is not None:
             number(self.confidence, 'confidence', unit=True)
-        freeze_fields(self, ('value', 'supports', 'contradicts', 'provenance',
-                             'supporting_evidence_ids', 'opposing_evidence_ids'))
+        names = ('value', 'supports', 'contradicts', 'provenance',
+                 'supporting_evidence_ids', 'opposing_evidence_ids')
+        if self.source_type in INTEGRATION_STATUSES:
+            # Structured physical uncertainty is not a scalar probability.
+            for name in names:
+                object.__setattr__(self, name, freeze(getattr(self, name), name))
+            if not isinstance(self.provenance, Mapping):
+                raise ValueError('provenance must be a structured mapping')
+        else:
+            freeze_fields(self, names)
         if not isinstance(self.value, Mapping):
             raise ValueError('value must be a structured mapping')
         for name in ('supports', 'contradicts', 'supporting_evidence_ids', 'opposing_evidence_ids'):
