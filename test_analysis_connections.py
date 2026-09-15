@@ -18,7 +18,7 @@ from fifth_layer.world_state import WorldState
 
 def live_functions(*names):
     names = (*names, 'update_fast_scene')
-    tree = ast.parse(Path("live_app.py").read_text())
+    tree = ast.parse(Path("live_app.py").read_bytes())
     tree.body = [node for node in tree.body
                  if isinstance(node, ast.FunctionDef) and node.name in names]
     from fifth_layer.prediction_evaluation import PredictionEvaluationMemory, evaluation_overlay
